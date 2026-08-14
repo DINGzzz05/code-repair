@@ -36,3 +36,10 @@ repomix-output.txt
 .aider*
 
 .apptainer-cache
+
+# Personal / unrelated files
+.vscode/
+resume/
+手撕.md
+手撕.py
+LEARNING_GUIDE.md
