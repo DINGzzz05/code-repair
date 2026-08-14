@@ -29,8 +29,11 @@ consumed by ``get_swe_gym_repo_repair_dataset(..., difficulty_path=...)``.
 """
 
 import argparse
+import json
 import logging
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
 
 from datasets import Dataset, DatasetInfo
@@ -132,6 +135,24 @@ def main() -> None:
     rollout_dataset = Dataset.from_list(all_solutions, info=info)
     rollout_dataset.save_to_disk(args.output_dir)
     logger.info(f"Saved {len(all_solutions)} labeled-ready rollouts to {args.output_dir}")
+    meta_path = Path(args.output_dir).with_name(Path(args.output_dir).name + ".meta.json")
+    meta_path.write_text(
+        json.dumps(
+            {
+                "dataset_name": args.dataset_name,
+                "model": args.model,
+                "backend": args.backend,
+                "num_rollouts_per_instance": args.num_rollouts,
+                "holdout_ratio": SWE_GYM_HOLDOUT_RATIO,
+                "instances": len(dataset),
+                "rollouts": len(all_solutions),
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    logger.info(f"Measurement metadata written to {meta_path}")
     logger.info(
         "Next steps:\n"
         f"  1) uv run python src/merge_sft_pass_fail.py --dataset-path {args.output_dir} "
@@ -142,7 +163,10 @@ def main() -> None:
         f"{args.output_dir} --instance-results "
         "evaluation_results/swe_gym_difficulty_v1/instance_results.jsonl "
         f"--output-path {args.output_dir}_with_passed "
-        "--difficulty-out data/swe_gym_difficulty.jsonl"
+        "--difficulty-out data/swe_gym_difficulty.jsonl\n"
+        "  4) uv run python src/bin_difficulty.py --difficulty-in "
+        "data/swe_gym_difficulty.jsonl --difficulty-out "
+        "data/swe_gym_difficulty_relative.jsonl --num-bins 5 --min-bin-size 0.05"
     )
 
 

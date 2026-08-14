@@ -33,6 +33,8 @@ class RunConfig:
     max_passed_per_instance: int = 4  # keep at most the 4 shortest passing rollouts per instance
     apply_sample_weights: bool = True  # w = total_rollouts / passed_rollouts; low pass rate -> higher weight
     sample_weight_exponent: float = 0.5  # soften weights: w = (N/n)^exponent; 1.0 = full inverse pass rate
+    validation_ratio: float = 0.0  # >0: hold out this fraction of instances for eval (instance-level)
+    validation_seed: int = 42
     commit_hash: str = ""  # added at runtime
     push_to_hub: bool = True
 
@@ -133,13 +135,21 @@ def main(cfg: Config) -> None:
         logger.info(f"Using LoRA with r={cfg.model.r}, alpha={cfg.model.lora_alpha}")
     
     # Load and prepare dataset using the swe_gym function
-    train_dataset = get_swe_gym_formatted_sft_dataset(
+    formatted = get_swe_gym_formatted_sft_dataset(
         dataset_name=cfg.run.dataset_name,
         only_passed=cfg.run.only_passed,
         max_passed_per_instance=cfg.run.max_passed_per_instance,
         apply_sample_weights=cfg.run.apply_sample_weights,
         sample_weight_exponent=cfg.run.sample_weight_exponent,
+        validation_ratio=cfg.run.validation_ratio,
+        validation_seed=cfg.run.validation_seed,
     )
+    eval_dataset = None
+    if cfg.run.validation_ratio and cfg.run.validation_ratio > 0:
+        train_dataset, eval_dataset = formatted
+        logger.info(f"Validation split: {len(eval_dataset)} eval rollouts held out")
+    else:
+        train_dataset = formatted
     
     if len(train_dataset) == 0:
         raise ValueError("No training examples after preprocessing!")
@@ -150,22 +160,28 @@ def main(cfg: Config) -> None:
     if cfg.sft.kl_lambda == 0.0:
         params.pop("kl_lambda")
         training_args = HFSFTConfig(**params)
-        trainer = HFSFTTrainer(
+        trainer_kwargs = dict(
             model=model,
             args=training_args,
             train_dataset=train_dataset,
             processing_class=tokenizer,
             peft_config=peft_config,
         )
+        if eval_dataset is not None:
+            trainer_kwargs["eval_dataset"] = eval_dataset
+        trainer = HFSFTTrainer(**trainer_kwargs)
     else:
         training_args = KLSFTConfig(**params)
-        trainer = KLSFTTrainer(
+        trainer_kwargs = dict(
             model=model,
             args=training_args,
             train_dataset=train_dataset,
             processing_class=tokenizer,
             peft_config=peft_config,
         )
+        if eval_dataset is not None:
+            trainer_kwargs["eval_dataset"] = eval_dataset
+        trainer = KLSFTTrainer(**trainer_kwargs)
     
     
     # Train the model

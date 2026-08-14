@@ -2,7 +2,7 @@ import logging
 import hashlib
 import json
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Optional
 
@@ -20,6 +20,19 @@ DIFFICULTY_MODES = ("all", "easy", "hard", "curriculum")
 
 PASS_FIELDS = ("passed", "pass", "resolved", "success", "status")
 PASS_STRING_VALUES = {"pass", "passed", "true", "success", "resolved", "1"}
+
+# Metadata columns that must never reach the SFT prompt/training path.
+SFT_DROP_COLUMNS = {
+    "oracle_diff",
+    "oracle_test_diff",
+    "patch",
+    "test_patch",
+    "repo",
+    "base_commit",
+    "problem_statement",
+    "generated_diff",
+    "prompt",
+}
 
 
 def _get_swe_gym_split(
@@ -60,6 +73,10 @@ def _get_swe_gym_split(
     else:
         swe_ds = swe_ds.filter(lambda x: not should_be_holdout(x))
         logger.info(f"Creating repository repair dataset with {len(swe_ds)} examples")
+
+    _log_partition_balance(
+        swe_ds, "holdout" if holdout_partition else "repo_repair"
+    )
     
     # Add a dummy "prompt" key for compatibility with trl
     swe_ds = swe_ds.map(lambda x: {"prompt": "Dummy"})
@@ -67,13 +84,24 @@ def _get_swe_gym_split(
     return swe_ds
 
 
-def load_difficulty_map(difficulty_path: Optional[str]) -> dict[str, tuple[int, int]]:
+def _log_partition_balance(dataset: Dataset, partition_name: str) -> None:
+    """Log size and repo distribution of a partition to surface split imbalance."""
+    repos = Counter(str(example.get("repo", "unknown")) for example in dataset)
+    top = repos.most_common(10)
+    logger.info(
+        f"{partition_name} partition balance: {len(dataset)} instances; "
+        f"top repos {top[:5]}"
+    )
+
+
+def load_difficulty_map(difficulty_path: Optional[str]) -> dict[str, dict[str, Any]]:
     """
-    Load per-instance pass counts from a difficulty.jsonl file produced by
-    ``merge_sft_pass_fail.py --difficulty-out``.
+    Load per-instance difficulty labels from a difficulty.jsonl file produced by
+    ``merge_sft_pass_fail.py --difficulty-out`` (absolute pass counts) or
+    ``src/bin_difficulty.py`` (relative bins, ranks and tiers).
 
     Returns:
-        Mapping of instance_id -> (n_passed, n_total)
+        Mapping of instance_id -> label dict
     """
     if not difficulty_path:
         return {}
@@ -87,10 +115,13 @@ def load_difficulty_map(difficulty_path: Optional[str]) -> dict[str, tuple[int, 
                 continue
             record = json.loads(line)
             instance_id = str(record["instance_id"])
-            mapping[instance_id] = (
-                int(record.get("n_passed", 0)),
-                int(record.get("n_total", 0)),
-            )
+            mapping[instance_id] = {
+                "n_passed": int(record.get("n_passed", 0)),
+                "n_total": int(record.get("n_total", 0)),
+                "difficulty_bin": record.get("difficulty_bin"),
+                "difficulty_rank": record.get("difficulty_rank"),
+                "difficulty_tier": record.get("difficulty_tier"),
+            }
     logger.info(
         f"Loaded difficulty labels for {len(mapping)} instances from {difficulty_path}"
     )
@@ -98,21 +129,44 @@ def load_difficulty_map(difficulty_path: Optional[str]) -> dict[str, tuple[int, 
 
 
 def add_difficulty_columns(
-    dataset: Dataset, difficulty_map: dict[str, tuple[int, int]]
+    dataset: Dataset, difficulty_map: dict[str, dict[str, Any]]
 ) -> Dataset:
     """
     Attach pass-rate difficulty columns to an RL dataset:
     ``n_passed``, ``n_total``, ``difficulty_score`` (n_passed / n_total) and
-    ``difficulty_bin`` (equal to n_passed). Instances missing from the map get
-    -1 markers and are excluded by ``easy``/``hard``/``curriculum`` modes.
+    ``difficulty_bin`` (relative bin when the map came from bin_difficulty.py,
+    falling back to absolute n_passed), plus ``difficulty_rank`` and
+    ``difficulty_tier`` when available. Instances missing from the map get -1
+    markers and are excluded by ``easy``/``hard``/``curriculum`` modes.
     """
     def add(example: dict[str, Any]) -> dict[str, Any]:
-        n_passed, n_total = difficulty_map.get(str(example["instance_id"]), (-1, -1))
+        info = difficulty_map.get(str(example["instance_id"]))
+        if info is None:
+            return {
+                "n_passed": -1,
+                "n_total": -1,
+                "difficulty_score": -1.0,
+                "difficulty_bin": -1,
+                "difficulty_rank": -1.0,
+                "difficulty_tier": "unknown",
+            }
+        n_passed = info["n_passed"]
+        n_total = info["n_total"]
         return {
             "n_passed": n_passed,
             "n_total": n_total,
             "difficulty_score": (n_passed / n_total) if n_total > 0 else -1.0,
-            "difficulty_bin": n_passed,
+            "difficulty_bin": (
+                info["difficulty_bin"] if info["difficulty_bin"] is not None else n_passed
+            ),
+            "difficulty_rank": (
+                info["difficulty_rank"]
+                if info["difficulty_rank"] is not None
+                else -1.0
+            ),
+            "difficulty_tier": (
+                info["difficulty_tier"] if info["difficulty_tier"] else "unknown"
+            ),
         }
 
     return dataset.map(add)
@@ -317,6 +371,28 @@ def _apply_static_weights(dataset: Dataset, weight_exponent: float) -> Dataset:
     return dataset.select(indices)
 
 
+def _split_by_instance(
+    dataset: Dataset, ratio: float, seed: int
+) -> tuple[Dataset, Dataset]:
+    """Split by instance (not by rollout) so no instance spans train and eval."""
+    instance_ids = sorted({str(x) for x in dataset["instance_id"]})
+    rng = random.Random(seed)
+    rng.shuffle(instance_ids)
+    n_eval = max(1, int(round(len(instance_ids) * ratio)))
+    eval_ids = set(instance_ids[:n_eval])
+    eval_part = dataset.filter(lambda x: str(x["instance_id"]) in eval_ids)
+    train_part = dataset.filter(lambda x: str(x["instance_id"]) not in eval_ids)
+    return train_part, eval_part
+
+
+def _drop_sft_metadata(dataset: Dataset) -> Dataset:
+    """Remove columns that must never reach the SFT prompt/training path."""
+    columns = [c for c in dataset.column_names if c in SFT_DROP_COLUMNS]
+    if columns:
+        dataset = dataset.remove_columns(columns)
+    return dataset
+
+
 def get_swe_gym_formatted_sft_dataset(
     dataset_name: str,
     only_passed: bool = True,
@@ -324,6 +400,9 @@ def get_swe_gym_formatted_sft_dataset(
     max_passed_per_instance: Optional[int] = 4,
     apply_sample_weights: bool = True,
     sample_weight_exponent: float = 0.5,
+    validation_ratio: float = 0.0,
+    validation_seed: int = 42,
+    drop_metadata_columns: bool = True,
     **kwargs
 ) -> Dataset:
     """
@@ -350,9 +429,15 @@ def get_swe_gym_formatted_sft_dataset(
             ``w = (num_total_rollouts / num_passed_rollouts) ** exponent``.
             1.0 is the full-strength inverse pass rate; lower values (default
             0.5) soften the weight spread; ``<= 0`` disables weighting.
+        validation_ratio: If > 0, hold out this fraction of *instances* as an
+            eval split (never mixed with train) and return ``(train, eval)``.
+        validation_seed: Seed for the instance-level eval split.
+        drop_metadata_columns: Remove oracle/ground-truth and repo metadata
+            columns from the returned dataset(s) to prevent prompt leakage.
         
     Returns:
-        The formatted dataset ready for SFT training
+        The formatted dataset ready for SFT training, or a ``(train, eval)``
+        tuple when ``validation_ratio > 0``.
     """
     logger.info(f"Loading curated SFT dataset: {dataset_name}")
     
@@ -407,10 +492,30 @@ def get_swe_gym_formatted_sft_dataset(
         }
     )
 
+    train_part = dataset
+    eval_part = None
+    if validation_ratio and validation_ratio > 0:
+        train_part, eval_part = _split_by_instance(
+            dataset, validation_ratio, validation_seed
+        )
+
     if apply_sample_weights:
-        dataset = _apply_static_weights(dataset, weight_exponent=sample_weight_exponent)
-    
-    return dataset
+        train_part = _apply_static_weights(
+            train_part, weight_exponent=sample_weight_exponent
+        )
+
+    if drop_metadata_columns:
+        train_part = _drop_sft_metadata(train_part)
+        if eval_part is not None:
+            eval_part = _drop_sft_metadata(eval_part)
+
+    if eval_part is not None:
+        logger.info(
+            f"SFT validation split (instance-level, ratio={validation_ratio}): "
+            f"{len(train_part)} train / {len(eval_part)} eval rollouts"
+        )
+        return train_part, eval_part
+    return train_part
 
 if __name__ == "__main__":
     ds = load_dataset("SWE-Gym/SWE-Gym-Lite")

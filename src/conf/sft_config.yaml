@@ -9,6 +9,8 @@ run:
   max_passed_per_instance: 4  # if an instance has more passing rollouts, keep only the 4 shortest
   apply_sample_weights: true  # w = num_total_rollouts / num_passed_rollouts; low pass rate -> higher weight
   sample_weight_exponent: 0.5  # w = (N/n)^0.5; 1.0 = full inverse pass rate, lower = softer, <=0 = off
+  validation_ratio: 0.0  # >0: hold out this fraction of instances for eval (instance-level)
+  validation_seed: 42
   dataset_name: "ASSERT-KTH/Nano-SFT-SWE-Gym-gemini-2.5-flash"
   push_to_hub: false
   commit_hash: ""  # will be set automatically

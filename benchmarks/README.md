@@ -133,6 +133,12 @@ uv run python src/merge_sft_pass_fail.py \
   --instance-results evaluation_results/swe_gym_difficulty_v1/instance_results.jsonl \
   --output-path data/swe_gym_difficulty_measurement_with_passed \
   --difficulty-out data/swe_gym_difficulty.jsonl
+
+# 3) Turn absolute pass counts into relative difficulty bins (distribution-driven)
+uv run python src/bin_difficulty.py \
+  --difficulty-in data/swe_gym_difficulty.jsonl \
+  --difficulty-out data/swe_gym_difficulty_relative.jsonl \
+  --num-bins 5 --min-bin-size 0.05
 ```
 
 Then train GRPO with the annealing curriculum:
@@ -141,18 +147,57 @@ Then train GRPO with the annealing curriculum:
 uv run python src/train_grpo.py \
   run=repo_repair \
   run.difficulty=curriculum \
-  run.difficulty_path=data/swe_gym_difficulty.jsonl \
+  run.difficulty_path=data/swe_gym_difficulty_relative.jsonl \
   grpo.curriculum.enabled=true \
   grpo.run_name=swe_gym_curriculum_v1
 ```
 
-The annealer starts at the easiest bin (`n_passed == 8`, all rollouts passed)
-and slides to the hardest bin (`n_passed == 0`), sampling batches from a
-softmax window around the current center (radius `curriculum.window`,
-sharpness `curriculum.tau`) while keeping a minimum `easy_mix_floor` share of
-easiest-bin data to prevent forgetting. `run.difficulty=easy|hard` (with an
-optional `run.difficulty_threshold`, default median) selects a static subset
-instead of annealing.
+Difficulty is defined relative to the measured distribution: `bin_difficulty.py`
+aggregates distinct pass-count levels into at most `--num-bins` equal-ish bins
+(merging undersized bins), so even when most instances have only 0-2 passing
+rollouts the curriculum still has meaningful easy/medium/hard tiers. The
+annealer starts at the easiest bin present and slides to the hardest bin,
+sampling batches from a softmax window around the current center (radius
+`curriculum.window`, sharpness `curriculum.tau`) while keeping a minimum
+`easy_mix_floor` share of easiest-bin data to prevent forgetting.
+`run.difficulty=easy|hard` (with an optional `run.difficulty_threshold`,
+default median) selects a static subset instead of annealing.
+
+### Fine-grained live difficulty loop
+
+Optionally, difficulty labels refresh *during* RL training instead of using a
+stale offline measurement. Every completed rollout updates the live difficulty
+state with a cheap proxy signal (unified diff similarity vs. the oracle patch,
+compared against a calibrated threshold); every `rebin_every_steps` steps the
+relative bins are recomputed from the live pass-rate distribution, so the
+annealing curriculum follows the model being trained.
+
+```bash
+uv run python src/train_grpo.py run=repo_repair \
+  run.difficulty=curriculum \
+  run.difficulty_path=data/swe_gym_difficulty.jsonl \
+  grpo.curriculum.enabled=true \
+  grpo.live_difficulty.enabled=true \
+  grpo.live_difficulty.calibration_dataset=data/swe_gym_difficulty_measurement_with_passed \
+  grpo.live_difficulty.rebin_every_steps=200 \
+  grpo.run_name=swe_gym_live_curriculum_v1
+```
+
+The pseudo-pass threshold is auto-calibrated from the labeled measurement
+dataset (maximizing F1 between diff similarity and real `passed` labels).
+
+Optional async harness calibration (phase 2): point `live_difficulty.harness_dir`
+at a directory and run the worker on the training machine. Every
+`export_every_steps` steps the training process exports the best pending diff
+per instance to `harness_dir/inbox`; the worker runs the harness and drops
+`instance_results.jsonl` into `harness_dir/outbox`, which the training process
+folds back as real pass/fail evidence:
+
+```bash
+uv run python src/harness_worker.py \
+  --inbox data/live_harness/inbox \
+  --outbox data/live_harness/outbox
+```
 
 ## Results
 

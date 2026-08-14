@@ -20,12 +20,26 @@ loss_type: "dr_grpo"
 # Requires run.difficulty="curriculum" and a difficulty.jsonl from measurement.
 curriculum:
   enabled: false
-  start_bin: 8  # easiest bin (all rollouts passed)
-  end_bin: 0    # hardest bin (no rollout passed)
+  start_bin: null  # auto: highest bin present (easiest) after dynamic binning
+  end_bin: null    # auto: lowest bin present (hardest)
   window: 1     # radius of active bins around the annealing center
   tau: 1.0      # softmax sharpness; smaller = sharper transition
   easy_mix_floor: 0.15  # minimum share of easiest-bin data per batch (anti-forgetting)
   seed: 42
+
+# Fine-grained live difficulty loop: every rollout updates the difficulty state
+# via a calibrated diff-similarity proxy; bins are re-computed periodically.
+live_difficulty:
+  enabled: false
+  pass_threshold: null       # null = auto-calibrate from calibration_dataset
+  calibration_dataset: null  # labeled measurement dataset (with passed + diffs)
+  num_bins: 5
+  min_bin_size: 0.05
+  rebin_every_steps: 200
+  score_window: 50           # live pass rate uses the last N proxy scores per instance
+  prior_decay_tau: null      # null = auto (total_steps/4); >0 = exp(-step/tau); 0 = never decay
+  harness_dir: null          # optional async harness calibration (inbox/outbox subdirs)
+  export_every_steps: 500
 
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:

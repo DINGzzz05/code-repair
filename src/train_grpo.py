@@ -1,5 +1,6 @@
 import os
 import logging
+import math
 from functools import partial
 from dataclasses import dataclass, field
 from typing import Optional
@@ -39,6 +40,12 @@ from src.data import (
 )
 from src.utils.git import resolve_git_commit_hash
 from src.trainers.curriculum import CurriculumConfig, CurriculumGRPOTrainer
+from src.live_difficulty import (
+    LiveDifficultyConfig,
+    LiveDifficultyState,
+    calibrate_pass_threshold,
+    tracking_rollout_func,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,6 +59,15 @@ logger.setLevel(logging.INFO)
 
 for noisy in ("httpx", "LiteLLM"):
     logging.getLogger(noisy).setLevel(logging.CRITICAL)
+
+
+def _estimate_total_steps(cfg, dataset_len: int) -> int:
+    """Estimate total GRPO training steps for curriculum/live-difficulty schedules."""
+    if cfg.grpo.max_steps and cfg.grpo.max_steps > 0:
+        return int(cfg.grpo.max_steps)
+    per_epoch = math.ceil(dataset_len / max(1, cfg.grpo.generation_batch_size))
+    return per_epoch * max(1, cfg.grpo.num_train_epochs)
+
 
 @dataclass
 class RunConfig:
@@ -156,6 +172,8 @@ class GRPOConfig:
 
     # Curriculum annealing over instance difficulty (easy -> hard)
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
+    # Fine-grained live difficulty loop (proxy updates + optional harness calibration)
+    live_difficulty: LiveDifficultyConfig = field(default_factory=LiveDifficultyConfig)
 
     # silence peft warnings
     label_names: list[str] = field(default_factory=lambda: ["labels"])
@@ -228,6 +246,7 @@ def main(cfg: Config) -> None:
         lora_config = None
 
     rollout_func = None
+    live_state = None
     # Get dataset based on the task
     if cfg.run.task_type == "repair":
         get_repair_dataset = get_stack_repair_dataset if cfg.run.dataset_type == "stack" else get_primevul_repair_dataset
@@ -292,6 +311,39 @@ def main(cfg: Config) -> None:
             logger.info(
                 f"RL difficulty distribution (n_passed -> instances): {dict(sorted(bins.items()))}"
             )
+
+        if cfg.grpo.live_difficulty.enabled:
+            if not cfg.grpo.curriculum.enabled:
+                raise ValueError(
+                    "grpo.live_difficulty.enabled requires grpo.curriculum.enabled=true"
+                )
+            if cfg.run.difficulty != "curriculum" or not cfg.run.difficulty_path:
+                raise ValueError(
+                    "grpo.live_difficulty.enabled requires run.difficulty='curriculum' "
+                    "and run.difficulty_path pointing at the measured difficulty.jsonl"
+                )
+            from src.data.swe_gym import load_difficulty_map
+
+            live_cfg = LiveDifficultyConfig(
+                **OmegaConf.to_container(cfg.grpo.live_difficulty, resolve=True)
+            )
+            if live_cfg.pass_threshold is None and live_cfg.calibration_dataset:
+                from datasets import load_from_disk
+
+                calibration_ds = load_from_disk(live_cfg.calibration_dataset)
+                live_cfg.pass_threshold = calibrate_pass_threshold(calibration_ds)
+            if live_cfg.pass_threshold is None:
+                live_cfg.pass_threshold = 0.5
+            live_state = LiveDifficultyState(
+                load_difficulty_map(cfg.run.difficulty_path),
+                live_cfg,
+                total_steps=_estimate_total_steps(cfg, len(dataset)),
+            )
+            rollout_func = tracking_rollout_func(rollout_func, live_state)
+            logger.info(
+                f"Live difficulty loop enabled: threshold={live_cfg.pass_threshold}, "
+                f"rebin every {live_cfg.rebin_every_steps} steps"
+            )
         
         # Update agent config with model and token_limit
         cfg.agent.model = f"hosted_vllm/{cfg.model.model_name}"
@@ -328,6 +380,7 @@ def main(cfg: Config) -> None:
     # Convert grpo config from OmegaConf to regular Python dict to ensure JSON serialization works
     grpo_params = OmegaConf.to_container(cfg.grpo, resolve=True)
     curriculum_params = grpo_params.pop("curriculum", None)
+    live_difficulty_params = grpo_params.pop("live_difficulty", None)
     grpo_params["reward_weights"] = reward_weights
     grpo_params["output_dir"] = f"outputs/{cfg.grpo.run_name}"
     
@@ -349,7 +402,9 @@ def main(cfg: Config) -> None:
     )
     if curriculum_params and curriculum_params.get("enabled", False):
         trainer = CurriculumGRPOTrainer(
-            curriculum=CurriculumConfig(**curriculum_params), **trainer_kwargs
+            curriculum=CurriculumConfig(**curriculum_params),
+            live_state=live_state,
+            **trainer_kwargs,
         )
     else:
         trainer = HFGRPOTrainer(**trainer_kwargs)
