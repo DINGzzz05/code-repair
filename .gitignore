@@ -43,3 +43,8 @@ resume/
 手撕.md
 手撕.py
 LEARNING_GUIDE.md
+
+# Documentation / non-runtime files
+docs/
+README.md
+CITATION.cff
