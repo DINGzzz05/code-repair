@@ -319,12 +319,14 @@ def nano_rollout_func(data: list[dict[str, Any]], config: NanoConfig, dataset_na
 if __name__ == "__main__":
     import time
 
-    from src.data.swe_gym import get_swe_gym_repo_repair_dataset
+    from src.data.swe_gym import SWE_GYM_HOLDOUT_RATIO, get_swe_gym_repo_repair_dataset
 
     # Test different batch sizes for parallel timing
     batch_sizes = [2]
     runs = 1
-    data = get_swe_gym_repo_repair_dataset().shuffle(seed=42)
+    data = get_swe_gym_repo_repair_dataset(
+        dataset_name="SWE-Gym/SWE-Gym", holdout_ratio=SWE_GYM_HOLDOUT_RATIO
+    ).shuffle(seed=42)
 
     config = NanoConfig(model="hosted_vllm/Qwen/Qwen3-8B", backend="apptainer")
 

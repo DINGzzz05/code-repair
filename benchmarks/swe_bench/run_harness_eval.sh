@@ -9,6 +9,14 @@ set -euo pipefail
 #     --run-id my_run \
 #     [--max-workers 8]
 #
+# For SWE-Gym SFT curation rollouts, use:
+#   benchmarks/swe_bench/run_harness_eval.sh \
+#     --subset swegym --split train \
+#     --preds /abs/path/to/preds.jsonl \
+#     --run-id my_run
+# Note: SWE-Gym/SWE-Gym only has a `train` split, so --split train is required.
+# SWE-Gym images must be pulled beforehand (see scripts/pull_swegym_images.py).
+#
 # Note: --run-id is required
 #
 # Requirements (on this CPU server):
@@ -55,8 +63,12 @@ case "$subset" in
     dataset_name="princeton-nlp/SWE-bench_Lite";;
   full|Full|main)
     dataset_name="princeton-nlp/SWE-bench";;
+  swegym|SWE-Gym|SWE-Gym/SWE-Gym)
+    dataset_name="SWE-Gym/SWE-Gym";;
+  swegym-lite|SWE-Gym-Lite)
+    dataset_name="SWE-Gym/SWE-Gym-Lite";;
   *)
-    echo "ERROR: Unknown subset '$subset' (expected: verified|lite|full)" >&2
+    echo "ERROR: Unknown subset '$subset' (expected: verified|lite|full|swegym|swegym-lite)" >&2
     exit 1;;
 esac
 

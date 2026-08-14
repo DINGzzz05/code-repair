@@ -70,6 +70,37 @@ benchmarks/swe_bench/run_harness_eval.sh \
   --run-id nano_test
 ```
 
+### Generating pass/fail labels for SFT curation
+
+Curated SFT rollouts (`curate_sft_data.py`) have no labels yet. Real pass/fail
+labels are produced by running the SWE-bench harness on the generated patches
+and merging the `resolved` results back as a `passed` column:
+
+```bash
+# 1) Export predictions from the curated dataset (any machine):
+uv run python src/merge_sft_pass_fail.py \
+  --dataset-path data/ASSERT-KTH-Nano-SFT-SWE-Gym-gemini-2.5-flash-v1.0 \
+  --preds-out data/ASSERT-KTH-Nano-SFT-SWE-Gym-gemini-2.5-flash-v1.0/preds.jsonl
+
+# 2) Run the harness on the training machine (Docker/Apptainer, SWE-Gym images pre-pulled):
+benchmarks/swe_bench/run_harness_eval.sh \
+  --subset swegym --split train \
+  --preds data/ASSERT-KTH-Nano-SFT-SWE-Gym-gemini-2.5-flash-v1.0/preds.jsonl \
+  --run-id sft_pass_fail_v1
+
+# 3) Merge the results back into the dataset (any machine):
+uv run python src/merge_sft_pass_fail.py \
+  --dataset-path data/ASSERT-KTH-Nano-SFT-SWE-Gym-gemini-2.5-flash-v1.0 \
+  --instance-results evaluation_results/sft_pass_fail_v1/instance_results.jsonl \
+  --output-path data/ASSERT-KTH-Nano-SFT-SWE-Gym-gemini-2.5-flash-v1.0_with_passed
+```
+
+The labeled dataset can then be loaded for SFT training with
+`only_passed=true` (see `src/data/swe_gym.py`), which keeps only rows where
+`passed` is true. Rows without a harness result default to `passed=false`.
+After filtering, at most 4 passing rollouts per instance are kept, preferring
+the shortest trajectories (configurable via `max_passed_per_instance`).
+
 ## Results
 
 Outputs are saved under:

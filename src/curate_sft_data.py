@@ -9,7 +9,7 @@ from huggingface_hub import whoami
 from datasets import Dataset, DatasetInfo
 from omegaconf import OmegaConf
 
-from src.data.swe_gym import get_swe_gym_holdout_dataset
+from src.data.swe_gym import SWE_GYM_HOLDOUT_RATIO, get_swe_gym_holdout_dataset
 from src.agents.nano_agent import _process_one, NanoConfig
 
 logging.basicConfig(level=logging.INFO)
@@ -23,7 +23,7 @@ for noisy in ("httpx", "LiteLLM", "transformers.tokenization_utils_base"):
 class CurationConfig:
     # Dataset configuration
     input_dataset_name: str = "SWE-Gym/SWE-Gym-Lite"
-    curation_ratio: float = 0.2
+    curation_ratio: float = SWE_GYM_HOLDOUT_RATIO
     dataset_version: str = "v1.0"
     push_to_hub: bool = False
     
@@ -71,6 +71,17 @@ def process_one(problem_data: dict[str, Any], config: NanoConfig, dataset_name: 
 
 @hydra.main(version_base="1.1", config_path="conf", config_name="curation_config")
 def main(cfg: Config) -> None:
+    # Strict isolation: the SFT holdout partition and the GRPO repo-repair
+    # partition must use the same ratio, otherwise the partitions overlap.
+    if cfg.curation.curation_ratio != SWE_GYM_HOLDOUT_RATIO:
+        raise ValueError(
+            f"curation_ratio ({cfg.curation.curation_ratio}) must equal "
+            f"SWE_GYM_HOLDOUT_RATIO ({SWE_GYM_HOLDOUT_RATIO}) so that the SFT "
+            "holdout and GRPO repo-repair partitions stay strictly disjoint. "
+            "Change SWE_GYM_HOLDOUT_RATIO in src/data/swe_gym.py if a different "
+            "ratio is needed."
+        )
+
     # Check HuggingFace login if pushing to hub
     if cfg.curation.push_to_hub:
         try:
@@ -158,6 +169,7 @@ to navigate repositories and solve software engineering problems from the SWE-Gy
 - {cfg.curation.num_rollouts_per_problem} rollouts per problem using Nano agent
 - Curation ratio: {cfg.curation.curation_ratio} (sampling {cfg.curation.curation_ratio * 100:.0f}% of the dataset)
 - All rollouts are retained; pass/fail filtering is applied when the dataset is loaded for SFT training via ``only_passed``
+- When loading for training, instances with more than 4 passing rollouts keep only the 4 shortest trajectories
 - Generated with temperature {cfg.agent.temperature}, top-p {cfg.agent.top_p}
         """
     )

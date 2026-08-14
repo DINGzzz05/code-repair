@@ -30,6 +30,7 @@ class RunConfig:
     wandb_project: str = "SWE-Gym-SFT"
     dataset_name: str = "bjarni/swe-gym-lite-sft"
     only_passed: bool = True
+    max_passed_per_instance: int = 4  # keep at most the 4 shortest passing rollouts per instance
     commit_hash: str = ""  # added at runtime
     push_to_hub: bool = True
 
@@ -132,7 +133,8 @@ def main(cfg: Config) -> None:
     # Load and prepare dataset using the swe_gym function
     train_dataset = get_swe_gym_formatted_sft_dataset(
         dataset_name=cfg.run.dataset_name,
-        only_passed=cfg.run.only_passed
+        only_passed=cfg.run.only_passed,
+        max_passed_per_instance=cfg.run.max_passed_per_instance,
     )
     
     if len(train_dataset) == 0:

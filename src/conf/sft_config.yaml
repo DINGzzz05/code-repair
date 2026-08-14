@@ -6,6 +6,7 @@ defaults:
 # Run configuration (parameters not in SFTConfig)
 run:
   only_passed: true  # keep only teacher trajectories whose fix passed
+  max_passed_per_instance: 4  # if an instance has more passing rollouts, keep only the 4 shortest
   dataset_name: "ASSERT-KTH/Nano-SFT-SWE-Gym-gemini-2.5-flash"
   push_to_hub: false
   commit_hash: ""  # will be set automatically

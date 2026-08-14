@@ -30,7 +30,13 @@ from src.rewards import (
     # repo repair rewards
     unified_diff_similarity_reward_func,
 )
-from src.data import get_stack_repair_dataset, get_primevul_repair_dataset, get_primevul_detection_dataset, get_swe_gym_repo_repair_dataset
+from src.data import (
+    SWE_GYM_HOLDOUT_RATIO,
+    get_stack_repair_dataset,
+    get_primevul_repair_dataset,
+    get_primevul_detection_dataset,
+    get_swe_gym_repo_repair_dataset,
+)
 from src.utils.git import resolve_git_commit_hash
 
 logging.basicConfig(
@@ -244,7 +250,9 @@ def main(cfg: Config) -> None:
         reward_weights = [0.1, 0.2, 0.7]
     elif cfg.run.task_type.startswith("repo_repair"):
         if cfg.run.task_type == "repo_repair_multilingual":  # a bit hacky
-            dataset_a = get_swe_gym_repo_repair_dataset(dataset_name="SWE-Gym/SWE-Gym").select(range(750))  # pick 750
+            dataset_a = get_swe_gym_repo_repair_dataset(
+                dataset_name="SWE-Gym/SWE-Gym", holdout_ratio=SWE_GYM_HOLDOUT_RATIO
+            ).select(range(750))  # pick 750
             dataset_b = get_swe_gym_repo_repair_dataset(dataset_name="SWE-bench/SWE-bench_Multilingual").select(range(250))  # use 250, leave 50 for evals
             dataset = concatenate_datasets([dataset_a, dataset_b])
             dataset = dataset.shuffle(seed=42)
@@ -253,7 +261,9 @@ def main(cfg: Config) -> None:
             dataset = dataset.filter(lambda x: not (x.get("repo") == "fastlane/fastlane"))
             logger.info(f"Filtered out problematic entries: {original_size} -> {len(dataset)}")
         else:
-            dataset = get_swe_gym_repo_repair_dataset(dataset_name=cfg.run.dataset_name)
+            dataset = get_swe_gym_repo_repair_dataset(
+                dataset_name=cfg.run.dataset_name, holdout_ratio=SWE_GYM_HOLDOUT_RATIO
+            )
         
         # Update agent config with model and token_limit
         cfg.agent.model = f"hosted_vllm/{cfg.model.model_name}"

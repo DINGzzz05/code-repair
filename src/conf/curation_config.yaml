@@ -10,7 +10,7 @@ hydra:
 curation:
   # Dataset configuration
   input_dataset_name: "SWE-Gym/SWE-Gym"
-  curation_ratio: 0.25
+  curation_ratio: 0.25  # must equal SWE_GYM_HOLDOUT_RATIO in src/data/swe_gym.py (strict isolation)
   dataset_version: "v1.0"
   push_to_hub: false
   
