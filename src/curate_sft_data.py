@@ -11,7 +11,6 @@ from omegaconf import OmegaConf
 
 from src.data.swe_gym import get_swe_gym_holdout_dataset
 from src.agents.nano_agent import _process_one, NanoConfig
-from src.rewards.diff import unified_diff_similarity_reward_func, unified_diff_file_match_reward_func, unified_diff_similarity_reward_func_test
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,35 +53,19 @@ class Config:
 cs = ConfigStore.instance()
 cs.store(name="base_curation_config", node=Config, group="")
 
-def process_one_with_reward(problem_data: dict[str, Any], config: NanoConfig, dataset_name: str) -> dict[str, Any]:
+def process_one(problem_data: dict[str, Any], config: NanoConfig, dataset_name: str) -> dict[str, Any]:
     """
-    Helper function that wraps _process_one and calculates reward.
+    Run one Nano rollout and attach SWE-Gym metadata to the result.
     """
     result = _process_one(problem_data, config, dataset_name)
-    
-    # Calculate rewards using same approach as train_grpo
-    generated_diff = result["generated_diff"]
-    
-    # Calculate individual rewards (keeping patch and test_patch separate)
-    file_match_reward = unified_diff_file_match_reward_func([problem_data["patch"]], [generated_diff])[0]
-    similarity_reward = unified_diff_similarity_reward_func([problem_data["patch"]], [generated_diff])[0]
-    test_similarity_reward = unified_diff_similarity_reward_func_test([problem_data["test_patch"]], [generated_diff])[0]
-    
-    # Combine rewards with same weights as train_grpo (0.2 file_match + 0.4 similarity + 0.4 test_similarity)
-    combined_reward = 0.2 * file_match_reward + 0.4 * similarity_reward + 0.4 * test_similarity_reward
-    
-    # Add all rewards to result
-    result["file_match_reward"] = file_match_reward
-    result["similarity_reward"] = similarity_reward
-    result["test_similarity_reward"] = test_similarity_reward
-    result["reward"] = combined_reward
+
     result["instance_id"] = problem_data["instance_id"]
     result["problem_statement"] = problem_data["problem_statement"]
     result["repo"] = problem_data["repo"]
     result["base_commit"] = problem_data["base_commit"]
     result["oracle_diff"] = problem_data["patch"]
     result["oracle_test_diff"] = problem_data["test_patch"]
-    
+
     return result
 
 
@@ -122,7 +105,7 @@ def main(cfg: Config) -> None:
     agent_config = NanoConfig(**OmegaConf.to_container(cfg.agent, resolve=True))
     
     with ThreadPoolExecutor(max_workers=cfg.curation.max_workers) as executor:
-        futures = [executor.submit(process_one_with_reward, task, agent_config, cfg.curation.input_dataset_name) for task in all_rollout_tasks]
+        futures = [executor.submit(process_one, task, agent_config, cfg.curation.input_dataset_name) for task in all_rollout_tasks]
         
         for future in as_completed(futures):
             completed_count += 1
@@ -136,15 +119,11 @@ def main(cfg: Config) -> None:
                     "oracle_diff": result["oracle_diff"],
                     "oracle_test_diff": result["oracle_test_diff"],
                     "generated_diff": result["generated_diff"],
-                    "reward": result["reward"],
-                    "file_match_reward": result["file_match_reward"],
-                    "similarity_reward": result["similarity_reward"],
-                    "test_similarity_reward": result["test_similarity_reward"],
                     "messages": result["prompt"] + result["completion"],
                     "tools": result["tools"]
                 }
                 all_solutions.append(solution)
-                logger.info(f"[{completed_count}/{len(all_rollout_tasks)}] Completed rollout for {solution['instance_id']} (reward: {solution['reward']:.3f})")
+                logger.info(f"[{completed_count}/{len(all_rollout_tasks)}] Completed rollout for {solution['instance_id']}")
             except Exception as e:
                 logger.error(f"[{completed_count}/{len(all_rollout_tasks)}] Rollout failed: {e}")
                 # Skip failed rollouts
@@ -172,17 +151,13 @@ to navigate repositories and solve software engineering problems from the SWE-Gy
 - `oracle_diff`: Ground truth patch diff
 - `oracle_test_diff`: Ground truth test diff
 - `generated_diff`: Agent-generated solution diff
-- `reward`: Combined weighted reward score (0.0 to 1.0)
-- `file_match_reward`: File matching reward (0.0 to 1.0, weight: 0.2)
-- `similarity_reward`: Patch similarity reward (0.0 to 1.0, weight: 0.4)
-- `test_similarity_reward`: Test similarity reward (0.0 to 1.0, weight: 0.4)
 - `messages`: Agent conversation with problem and solution
 - `tools`: Shell and navigation tools used by the agent
 
 ## Generation Process
 - {cfg.curation.num_rollouts_per_problem} rollouts per problem using Nano agent
 - Curation ratio: {cfg.curation.curation_ratio} (sampling {cfg.curation.curation_ratio * 100:.0f}% of the dataset)
-- All solutions with any kind of issue resolution is included with reward scores for post-processq filtering
+- All rollouts are retained; pass/fail filtering is applied when the dataset is loaded for SFT training via ``only_passed``
 - Generated with temperature {cfg.agent.temperature}, top-p {cfg.agent.top_p}
         """
     )

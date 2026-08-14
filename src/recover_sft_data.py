@@ -181,7 +181,8 @@ def main():
 
 This dataset was recovered from interrupted or completed nano agent runs.
 All histories contain successful code modifications as indicated by non-empty diffs.
-Use reward_min < -0.5 when loading this dataset for SFT training.
+Use ``only_passed=false`` when loading this recovered dataset for SFT training,
+because recovered histories do not contain pass/fail evaluation results.
             """
         )
         

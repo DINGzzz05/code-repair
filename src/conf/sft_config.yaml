@@ -5,7 +5,7 @@ defaults:
 
 # Run configuration (parameters not in SFTConfig)
 run:
-  reward_min: -1  # default to no rejection sampling
+  only_passed: true  # keep only teacher trajectories whose fix passed
   dataset_name: "ASSERT-KTH/Nano-SFT-SWE-Gym-gemini-2.5-flash"
   push_to_hub: false
   commit_hash: ""  # will be set automatically
@@ -14,4 +14,4 @@ run:
 
 hydra:
   job:
-    chdir: false # Prevents Hydra from changing the working directory 
+    chdir: false # Prevents Hydra from changing the working directory

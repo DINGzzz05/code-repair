@@ -29,7 +29,7 @@ for noisy in ("httpx", "LiteLLM", "transformers.tokenization_utils_base"):
 class RunConfig:
     wandb_project: str = "SWE-Gym-SFT"
     dataset_name: str = "bjarni/swe-gym-lite-sft"
-    reward_min: float = 0.2
+    only_passed: bool = True
     commit_hash: str = ""  # added at runtime
     push_to_hub: bool = True
 
@@ -132,7 +132,7 @@ def main(cfg: Config) -> None:
     # Load and prepare dataset using the swe_gym function
     train_dataset = get_swe_gym_formatted_sft_dataset(
         dataset_name=cfg.run.dataset_name,
-        reward_min=cfg.run.reward_min
+        only_passed=cfg.run.only_passed
     )
     
     if len(train_dataset) == 0:

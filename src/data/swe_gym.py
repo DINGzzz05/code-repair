@@ -1,10 +1,14 @@
 import logging
 import hashlib
-from typing import Any
+from typing import Any, Optional
 
 from datasets import load_dataset, Dataset
 
 logger = logging.getLogger(__name__)
+
+
+PASS_FIELDS = ("passed", "pass", "resolved", "success", "status")
+PASS_STRING_VALUES = {"pass", "passed", "true", "success", "resolved", "1"}
 
 
 def _get_swe_gym_split(dataset_name: str, holdout_partition: bool, holdout_ratio: float = 0.25) -> Dataset:
@@ -87,17 +91,23 @@ def get_swe_gym_holdout_dataset(
 
 def get_swe_gym_formatted_sft_dataset(
     dataset_name: str,
-    reward_min: float = 0.2,
+    only_passed: bool = True,
+    pass_field: Optional[str] = None,
     **kwargs
 ) -> Dataset:
     """
     Load and format a curated SFT dataset for training.
     This function loads an already-curated dataset (created by curate_sft_data.py)
-    and formats it for SFT training.
+    and formats it for SFT training. Teacher trajectories are kept only when
+    their pass/fail result indicates a successful fix.
     
     Args:
         dataset_name: HuggingFace dataset name for curated SFT data
-        reward_min: Minimum reward for rejection sampling
+        only_passed: If True, keep only passing trajectories. If False, return
+            the full dataset without pass/fail filtering.
+        pass_field: Optional name of the pass/fail column. If omitted, the
+            loader auto-detects one of ``passed``, ``pass``, ``resolved``,
+            ``success``, or ``status``.
         
     Returns:
         The formatted dataset ready for SFT training
@@ -110,7 +120,27 @@ def get_swe_gym_formatted_sft_dataset(
     logger.info(f"Preparing dataset with {len(dataset)} examples...")
     original_size = len(dataset)
     
-    dataset = dataset.filter(lambda x: x["reward"] > reward_min)
+    if not only_passed:
+        logger.info("Pass/fail filtering disabled; keeping all examples")
+        return dataset
+
+    fields = [pass_field] if pass_field else list(PASS_FIELDS)
+    available_fields = [field for field in fields if field in dataset.column_names]
+    if not available_fields:
+        raise ValueError(
+            "Pass/fail filtering is enabled, but the dataset has none of the "
+            f"supported pass/fail columns: {', '.join(fields)}."
+        )
+
+    pass_field = available_fields[0]
+
+    def is_pass_example(example: dict[str, Any]) -> bool:
+        value = example[pass_field]
+        if isinstance(value, str):
+            return value.strip().lower() in PASS_STRING_VALUES
+        return bool(value)
+
+    dataset = dataset.filter(is_pass_example)
     logger.info(f"Filtered dataset from {original_size} to {len(dataset)} examples")
     
     return dataset
