@@ -100,6 +100,59 @@ The labeled dataset can then be loaded for SFT training with
 `passed` is true. Rows without a harness result default to `passed=false`.
 After filtering, at most 4 passing rollouts per instance are kept, preferring
 the shortest trajectories (configurable via `max_passed_per_instance`).
+Each remaining trajectory also carries a static weight
+`w = (num_total_rollouts / num_passed_rollouts)^0.5` (stored as `sample_weight`)
+and the dataset is resampled proportionally to `w`, so trajectories from
+instances with a low pass rate contribute more to SFT training. The exponent
+(`sample_weight_exponent`, default 0.5) controls the strength: 1.0 gives the
+full 8:1 spread for a 1/8 pass rate, 0.5 softens it to about 2.8:1, and `<= 0`
+disables weighting.
+
+### RL difficulty curriculum (easy -> hard annealing)
+
+The GRPO stage can anneal instance difficulty from easy to hard within a single
+run. Difficulty is measured with the same pass-rate logic as SFT: run `N`
+rollouts per instance on the RL (repo-repair) partition, label them with the
+harness, and write a per-instance difficulty map:
+
+```bash
+# 1) Measure: N rollouts per instance on the RL partition
+uv run python src/measure_swe_gym_difficulty.py \
+  --dataset-name SWE-Gym/SWE-Gym --num-rollouts 8 --backend apptainer
+
+# 2) Label with the harness and write difficulty.jsonl
+uv run python src/merge_sft_pass_fail.py \
+  --dataset-path data/swe_gym_difficulty_measurement \
+  --preds-out data/swe_gym_difficulty_measurement/preds.jsonl
+benchmarks/swe_bench/run_harness_eval.sh \
+  --subset swegym --split train \
+  --preds data/swe_gym_difficulty_measurement/preds.jsonl \
+  --run-id swe_gym_difficulty_v1
+uv run python src/merge_sft_pass_fail.py \
+  --dataset-path data/swe_gym_difficulty_measurement \
+  --instance-results evaluation_results/swe_gym_difficulty_v1/instance_results.jsonl \
+  --output-path data/swe_gym_difficulty_measurement_with_passed \
+  --difficulty-out data/swe_gym_difficulty.jsonl
+```
+
+Then train GRPO with the annealing curriculum:
+
+```bash
+uv run python src/train_grpo.py \
+  run=repo_repair \
+  run.difficulty=curriculum \
+  run.difficulty_path=data/swe_gym_difficulty.jsonl \
+  grpo.curriculum.enabled=true \
+  grpo.run_name=swe_gym_curriculum_v1
+```
+
+The annealer starts at the easiest bin (`n_passed == 8`, all rollouts passed)
+and slides to the hardest bin (`n_passed == 0`), sampling batches from a
+softmax window around the current center (radius `curriculum.window`,
+sharpness `curriculum.tau`) while keeping a minimum `easy_mix_floor` share of
+easiest-bin data to prevent forgetting. `run.difficulty=easy|hard` (with an
+optional `run.difficulty_threshold`, default median) selects a static subset
+instead of annealing.
 
 ## Results
 

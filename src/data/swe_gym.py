@@ -1,6 +1,9 @@
 import logging
 import hashlib
+import json
+import random
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Optional
 
 from datasets import load_dataset, Dataset
@@ -13,6 +16,7 @@ logger = logging.getLogger(__name__)
 # complement. Always split with this ratio on both sides, otherwise the two
 # partitions overlap and data leaks between SFT and RL training.
 SWE_GYM_HOLDOUT_RATIO = 0.25
+DIFFICULTY_MODES = ("all", "easy", "hard", "curriculum")
 
 PASS_FIELDS = ("passed", "pass", "resolved", "success", "status")
 PASS_STRING_VALUES = {"pass", "passed", "true", "success", "resolved", "1"}
@@ -62,10 +66,86 @@ def _get_swe_gym_split(
     
     return swe_ds
 
+
+def load_difficulty_map(difficulty_path: Optional[str]) -> dict[str, tuple[int, int]]:
+    """
+    Load per-instance pass counts from a difficulty.jsonl file produced by
+    ``merge_sft_pass_fail.py --difficulty-out``.
+
+    Returns:
+        Mapping of instance_id -> (n_passed, n_total)
+    """
+    if not difficulty_path:
+        return {}
+    path = Path(difficulty_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Difficulty file not found: {difficulty_path}")
+    mapping: dict[str, tuple[int, int]] = {}
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            instance_id = str(record["instance_id"])
+            mapping[instance_id] = (
+                int(record.get("n_passed", 0)),
+                int(record.get("n_total", 0)),
+            )
+    logger.info(
+        f"Loaded difficulty labels for {len(mapping)} instances from {difficulty_path}"
+    )
+    return mapping
+
+
+def add_difficulty_columns(
+    dataset: Dataset, difficulty_map: dict[str, tuple[int, int]]
+) -> Dataset:
+    """
+    Attach pass-rate difficulty columns to an RL dataset:
+    ``n_passed``, ``n_total``, ``difficulty_score`` (n_passed / n_total) and
+    ``difficulty_bin`` (equal to n_passed). Instances missing from the map get
+    -1 markers and are excluded by ``easy``/``hard``/``curriculum`` modes.
+    """
+    def add(example: dict[str, Any]) -> dict[str, Any]:
+        n_passed, n_total = difficulty_map.get(str(example["instance_id"]), (-1, -1))
+        return {
+            "n_passed": n_passed,
+            "n_total": n_total,
+            "difficulty_score": (n_passed / n_total) if n_total > 0 else -1.0,
+            "difficulty_bin": n_passed,
+        }
+
+    return dataset.map(add)
+
+
+def _filter_by_difficulty(
+    dataset: Dataset, difficulty: str, threshold: Optional[int]
+) -> Dataset:
+    """Keep easy/hard instances based on their measured pass counts."""
+    dataset = dataset.filter(lambda x: int(x["n_passed"]) >= 0)
+    measured = sorted(int(x) for x in dataset["n_passed"])
+    if not measured:
+        logger.warning("No measured difficulty labels available; returning empty dataset")
+        return dataset
+    split = threshold if threshold is not None else measured[len(measured) // 2]
+    if difficulty == "easy":
+        kept = dataset.filter(lambda x: int(x["n_passed"]) >= split)
+    else:  # hard
+        kept = dataset.filter(lambda x: int(x["n_passed"]) < split)
+    logger.info(
+        f"Difficulty filter '{difficulty}' (threshold {split}): "
+        f"{len(dataset)} -> {len(kept)} instances"
+    )
+    return kept
+
+
 # mirroring the other data methods though not strictly doing much
 def get_swe_gym_repo_repair_dataset(
     dataset_name: str,
     holdout_ratio: float = SWE_GYM_HOLDOUT_RATIO,
+    difficulty: str = "all",
+    difficulty_path: Optional[str] = None,
+    difficulty_threshold: Optional[int] = None,
     **kwargs  # absorbs additional arguments required by the other get functions
 ) -> Dataset:
     """
@@ -82,7 +162,33 @@ def get_swe_gym_repo_repair_dataset(
     Returns:
         The processed dataset (repo repair partition)
     """
-    return _get_swe_gym_split(dataset_name, holdout_partition=False, holdout_ratio=holdout_ratio)
+    dataset = _get_swe_gym_split(
+        dataset_name, holdout_partition=False, holdout_ratio=holdout_ratio
+    )
+
+    if difficulty not in DIFFICULTY_MODES:
+        raise ValueError(
+            f"Unknown difficulty '{difficulty}' (expected one of {DIFFICULTY_MODES})"
+        )
+    if difficulty != "all" and not difficulty_path:
+        raise ValueError(
+            "difficulty_path is required when difficulty != 'all'. "
+            "Run measure_swe_gym_difficulty.py + merge_sft_pass_fail.py --difficulty-out first."
+        )
+    if difficulty == "all":
+        return dataset
+
+    dataset = add_difficulty_columns(dataset, load_difficulty_map(difficulty_path))
+    if difficulty in ("easy", "hard"):
+        dataset = _filter_by_difficulty(dataset, difficulty, difficulty_threshold)
+    else:  # curriculum mode keeps all measured instances (bins are used by the annealer)
+        before = len(dataset)
+        dataset = dataset.filter(lambda x: int(x["n_passed"]) >= 0)
+        logger.info(
+            f"Difficulty curriculum mode: kept {len(dataset)}/{before} "
+            "instances with measured pass counts"
+        )
+    return dataset
 
 def get_swe_gym_holdout_dataset(
     dataset_name: str,
@@ -164,11 +270,60 @@ def _cap_passed_rollouts_per_instance(
     return capped, passed_counts
 
 
+def _apply_static_weights(dataset: Dataset, weight_exponent: float) -> Dataset:
+    """
+    Assign each passing trajectory a static weight
+    ``w = (num_total_rollouts / num_passed_rollouts) ** weight_exponent`` and
+    resample the dataset proportionally to ``w`` via stochastic rounding (fixed
+    seed for reproducibility). Instances with a low pass rate get a higher
+    weight, so their (rare) passing trajectories contribute more to SFT
+    training. An exponent of 1.0 reproduces the plain inverse pass rate (8:1
+    for 1/8); smaller exponents soften the spread (0.5 turns it into ~2.8:1);
+    a non-positive exponent disables weighting.
+    """
+    if weight_exponent <= 0:
+        logger.info("Static sample weights disabled (weight_exponent <= 0)")
+        return dataset
+
+    required = {"num_total_rollouts", "num_passed_rollouts"}
+    if not required.issubset(set(dataset.column_names)):
+        logger.warning(
+            "Static sample weights requested but the dataset lacks "
+            f"{sorted(required)} columns; skipping weighting."
+        )
+        return dataset
+
+    def add_weight(example: dict[str, Any]) -> dict[str, Any]:
+        n_total = int(example["num_total_rollouts"])
+        n_passed = int(example["num_passed_rollouts"])
+        raw = (n_total / n_passed) if n_total > 0 and n_passed > 0 else 1.0
+        weight = raw ** weight_exponent
+        return {"sample_weight": float(weight)}
+
+    dataset = dataset.map(add_weight)
+
+    rng = random.Random(42)
+    indices: list[int] = []
+    for index, weight in enumerate(dataset["sample_weight"]):
+        count = int(weight)
+        if rng.random() < weight - count:
+            count += 1
+        indices.extend([index] * count)
+
+    logger.info(
+        f"Static pass-rate weights applied: {len(dataset)} -> {len(indices)} rows "
+        "(low pass rate -> higher sample weight)"
+    )
+    return dataset.select(indices)
+
+
 def get_swe_gym_formatted_sft_dataset(
     dataset_name: str,
     only_passed: bool = True,
     pass_field: Optional[str] = None,
     max_passed_per_instance: Optional[int] = 4,
+    apply_sample_weights: bool = True,
+    sample_weight_exponent: float = 0.5,
     **kwargs
 ) -> Dataset:
     """
@@ -187,6 +342,14 @@ def get_swe_gym_formatted_sft_dataset(
         max_passed_per_instance: After pass/fail filtering, keep at most this
             many passing rollouts per instance, preferring the shortest
             trajectories (``None`` or a non-positive value disables the cap).
+        apply_sample_weights: If True, weight trajectories by the inverse pass
+            rate of their instance and resample the dataset proportionally to
+            ``w``, so trajectories from instances with a low pass rate are
+            up-weighted during SFT.
+        sample_weight_exponent: Exponent applied to the inverse pass rate,
+            ``w = (num_total_rollouts / num_passed_rollouts) ** exponent``.
+            1.0 is the full-strength inverse pass rate; lower values (default
+            0.5) soften the weight spread; ``<= 0`` disables weighting.
         
     Returns:
         The formatted dataset ready for SFT training
@@ -243,6 +406,9 @@ def get_swe_gym_formatted_sft_dataset(
             "num_passed_rollouts": passed_counts[str(example["instance_id"])],
         }
     )
+
+    if apply_sample_weights:
+        dataset = _apply_static_weights(dataset, weight_exponent=sample_weight_exponent)
     
     return dataset
 

@@ -4,3 +4,6 @@ defaults:
 task_type: "repo_repair"
 dataset_type: "swe_gym"
 dataset_name: "SWE-Gym/SWE-Gym-Lite"
+difficulty: "all"  # all | easy | hard | curriculum (RL difficulty split)
+difficulty_path: null  # difficulty.jsonl from measurement; required unless difficulty=all
+difficulty_threshold: null  # optional easy/hard split; default = median of measured n_passed

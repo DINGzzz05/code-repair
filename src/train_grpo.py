@@ -38,6 +38,7 @@ from src.data import (
     get_swe_gym_repo_repair_dataset,
 )
 from src.utils.git import resolve_git_commit_hash
+from src.trainers.curriculum import CurriculumConfig, CurriculumGRPOTrainer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,6 +59,9 @@ class RunConfig:
     task_type: str = "repo_repair"
     dataset_type: str = "stack"
     dataset_name: Optional[str] = None
+    difficulty: str = "all"  # all | easy | hard | curriculum (RL difficulty split)
+    difficulty_path: Optional[str] = None  # difficulty.jsonl from measurement
+    difficulty_threshold: Optional[int] = None  # optional easy/hard split; default = median
     context_lines: int = 0  # number of context lines to include in diffs
     commit_hash: str = ""  # added at runtime
     push_to_hub: bool = True
@@ -149,6 +153,9 @@ class GRPOConfig:
     report_to: str = "wandb"
     run_name: str = ""  # required at runtime
     log_completions: bool = True
+
+    # Curriculum annealing over instance difficulty (easy -> hard)
+    curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
 
     # silence peft warnings
     label_names: list[str] = field(default_factory=lambda: ["labels"])
@@ -262,7 +269,28 @@ def main(cfg: Config) -> None:
             logger.info(f"Filtered out problematic entries: {original_size} -> {len(dataset)}")
         else:
             dataset = get_swe_gym_repo_repair_dataset(
-                dataset_name=cfg.run.dataset_name, holdout_ratio=SWE_GYM_HOLDOUT_RATIO
+                dataset_name=cfg.run.dataset_name,
+                holdout_ratio=SWE_GYM_HOLDOUT_RATIO,
+                difficulty=cfg.run.difficulty,
+                difficulty_path=cfg.run.difficulty_path,
+                difficulty_threshold=cfg.run.difficulty_threshold,
+            )
+
+        if cfg.grpo.curriculum.enabled and cfg.run.task_type != "repo_repair":
+            raise ValueError(
+                "grpo.curriculum.enabled is only supported for run.task_type='repo_repair'"
+            )
+        if cfg.grpo.curriculum.enabled and cfg.run.difficulty != "curriculum":
+            raise ValueError(
+                "grpo.curriculum.enabled requires run.difficulty='curriculum'"
+            )
+        if cfg.run.difficulty != "all" and "n_passed" in dataset.column_names:
+            bins = {}
+            for n in dataset["n_passed"]:
+                if int(n) >= 0:
+                    bins[int(n)] = bins.get(int(n), 0) + 1
+            logger.info(
+                f"RL difficulty distribution (n_passed -> instances): {dict(sorted(bins.items()))}"
             )
         
         # Update agent config with model and token_limit
@@ -299,6 +327,7 @@ def main(cfg: Config) -> None:
 
     # Convert grpo config from OmegaConf to regular Python dict to ensure JSON serialization works
     grpo_params = OmegaConf.to_container(cfg.grpo, resolve=True)
+    curriculum_params = grpo_params.pop("curriculum", None)
     grpo_params["reward_weights"] = reward_weights
     grpo_params["output_dir"] = f"outputs/{cfg.grpo.run_name}"
     
@@ -309,15 +338,21 @@ def main(cfg: Config) -> None:
     logger.info(f"Resuming from checkpoint: {resume_checkpoint}")
 
     # Initialize trainer with task-specific reward functions
-    trainer = HFGRPOTrainer(
+    trainer_kwargs = dict(
         model=model,
         processing_class=tokenizer,
         reward_funcs=reward_functions,
         rollout_func=rollout_func,
         args=training_args,
         train_dataset=dataset,
-        peft_config=lora_config
+        peft_config=lora_config,
     )
+    if curriculum_params and curriculum_params.get("enabled", False):
+        trainer = CurriculumGRPOTrainer(
+            curriculum=CurriculumConfig(**curriculum_params), **trainer_kwargs
+        )
+    else:
+        trainer = HFGRPOTrainer(**trainer_kwargs)
 
     # Properly pass the checkpoint path if provided; otherwise start fresh
     if resume_checkpoint:

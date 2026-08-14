@@ -170,6 +170,9 @@ to navigate repositories and solve software engineering problems from the SWE-Gy
 - Curation ratio: {cfg.curation.curation_ratio} (sampling {cfg.curation.curation_ratio * 100:.0f}% of the dataset)
 - All rollouts are retained; pass/fail filtering is applied when the dataset is loaded for SFT training via ``only_passed``
 - When loading for training, instances with more than 4 passing rollouts keep only the 4 shortest trajectories
+- Each passing trajectory gets a static weight ``sample_weight`` computed from the pass rate of its instance
+  (``(num_total_rollouts / num_passed_rollouts) ** 0.5`` by default); low pass rate trajectories are up-weighted
+  during SFT training, with the strength controlled by ``sample_weight_exponent``
 - Generated with temperature {cfg.agent.temperature}, top-p {cfg.agent.top_p}
         """
     )

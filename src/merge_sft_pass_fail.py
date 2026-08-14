@@ -150,6 +150,35 @@ def merge_passed(
     return labeled
 
 
+def write_difficulty_map(dataset: Dataset, output_path: Path) -> None:
+    """
+    Write per-instance pass counts (n_passed, n_total) from a labeled dataset
+    to a difficulty.jsonl consumed by the RL curriculum.
+    """
+    counts: dict[str, list[int]] = {}
+    for instance_id, passed in zip(dataset["instance_id"], dataset["passed"]):
+        key = str(instance_id)
+        entry = counts.setdefault(key, [0, 0])
+        entry[1] += 1
+        if bool(passed):
+            entry[0] += 1
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
+        for instance_id, (n_passed, n_total) in sorted(counts.items()):
+            f.write(
+                json.dumps(
+                    {"instance_id": instance_id, "n_passed": n_passed, "n_total": n_total},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    logger.info(
+        f"Difficulty map written to {output_path}: {len(counts)} instances "
+        f"({sum(1 for v in counts.values() if v[0] > 0)} with at least one pass)"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -184,6 +213,11 @@ def main() -> None:
         type=Path,
         help="results.json produced by the SWE-bench harness (fallback summary)",
     )
+    parser.add_argument(
+        "--difficulty-out",
+        type=Path,
+        help="Optional difficulty.jsonl (instance_id -> n_passed, n_total) for RL curriculum",
+    )
     parser.add_argument("--output-path", type=Path, help="Where to save the labeled dataset")
     parser.add_argument(
         "--push-to-hub",
@@ -210,7 +244,10 @@ def main() -> None:
         if not args.output_path:
             parser.error("--output-path is required when merging harness results")
         resolved_map = load_harness_results(args.instance_results, args.results)
-        merge_passed(dataset, resolved_map, args.output_path, source_desc)
+        labeled = merge_passed(dataset, resolved_map, args.output_path, source_desc)
+
+        if args.difficulty_out:
+            write_difficulty_map(labeled, args.difficulty_out)
 
         if args.push_to_hub:
             try:
@@ -220,7 +257,6 @@ def main() -> None:
                     "Not logged in to HuggingFace. Please run 'huggingface-cli login' first."
                 )
             hub_name = args.hub_dataset_name or f"ASSERT-KTH/{args.output_path.name}"
-            labeled = load_from_disk(str(args.output_path))
             labeled.push_to_hub(hub_name)
             logger.info(f"Pushed labeled dataset to https://huggingface.co/datasets/{hub_name}")
     else:

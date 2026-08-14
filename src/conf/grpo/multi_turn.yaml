@@ -16,6 +16,17 @@ gradient_accumulation_steps: 4
 
 loss_type: "dr_grpo"
 
+# Curriculum annealing over instance difficulty (easy -> hard).
+# Requires run.difficulty="curriculum" and a difficulty.jsonl from measurement.
+curriculum:
+  enabled: false
+  start_bin: 8  # easiest bin (all rollouts passed)
+  end_bin: 0    # hardest bin (no rollout passed)
+  window: 1     # radius of active bins around the annealing center
+  tau: 1.0      # softmax sharpness; smaller = sharper transition
+  easy_mix_floor: 0.15  # minimum share of easiest-bin data per batch (anti-forgetting)
+  seed: 42
+
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: true

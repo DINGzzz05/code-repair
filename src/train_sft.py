@@ -31,6 +31,8 @@ class RunConfig:
     dataset_name: str = "bjarni/swe-gym-lite-sft"
     only_passed: bool = True
     max_passed_per_instance: int = 4  # keep at most the 4 shortest passing rollouts per instance
+    apply_sample_weights: bool = True  # w = total_rollouts / passed_rollouts; low pass rate -> higher weight
+    sample_weight_exponent: float = 0.5  # soften weights: w = (N/n)^exponent; 1.0 = full inverse pass rate
     commit_hash: str = ""  # added at runtime
     push_to_hub: bool = True
 
@@ -135,6 +137,8 @@ def main(cfg: Config) -> None:
         dataset_name=cfg.run.dataset_name,
         only_passed=cfg.run.only_passed,
         max_passed_per_instance=cfg.run.max_passed_per_instance,
+        apply_sample_weights=cfg.run.apply_sample_weights,
+        sample_weight_exponent=cfg.run.sample_weight_exponent,
     )
     
     if len(train_dataset) == 0:
