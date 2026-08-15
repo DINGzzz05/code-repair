@@ -17,6 +17,13 @@ set -euo pipefail
 # Note: SWE-Gym/SWE-Gym only has a `train` split, so --split train is required.
 # SWE-Gym images must be pulled beforehand (see scripts/pull_swegym_images.py).
 #
+# For the out-of-domain / contamination probe, use:
+#   benchmarks/swe_bench/run_harness_eval.sh \
+#     --subset r2e-gym --split test \
+#     --preds /abs/path/to/preds.jsonl \
+#     --run-id my_run
+# R2E-Gym publishes SWE-Bench-format subsets scored with the official harness.
+#
 # Note: --run-id is required
 #
 # Requirements (on this CPU server):
@@ -67,8 +74,10 @@ case "$subset" in
     dataset_name="SWE-Gym/SWE-Gym";;
   swegym-lite|SWE-Gym-Lite)
     dataset_name="SWE-Gym/SWE-Gym-Lite";;
+  r2e-gym|r2egym|R2E-Gym)
+    dataset_name="R2E-Gym/SWE-Bench-Verified";;
   *)
-    echo "ERROR: Unknown subset '$subset' (expected: verified|lite|full|swegym|swegym-lite)" >&2
+    echo "ERROR: Unknown subset '$subset' (expected: verified|lite|full|swegym|swegym-lite|r2e-gym)" >&2
     exit 1;;
 esac
 
