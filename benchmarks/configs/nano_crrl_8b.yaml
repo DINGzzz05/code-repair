@@ -1,0 +1,60 @@
+# 4x RTX 4090 (24GB) safe plan - nano-agent eval config.
+# Serves the GRPO-merged Qwen3-8B model on GPU3 (scripts/4090/04_eval_serve.sh),
+# then runs SWE-bench Verified inference with run_nano_eval.py.
+#
+# Usage:
+#   uv run python benchmarks/swe_bench/run_nano_eval.py \
+#     --config benchmarks/configs/nano_crrl_8b.yaml \
+#     --output-dir nano_crrl_8b_swe-bench/run_0 \
+#     --slice :20   # smoke first, drop the slice for the full run
+#
+# Compatible with the SLURM orchestrator benchmarks/swe_bench_nano_infer_job.sh
+# ({BASE_MODEL}, {PORT}, {MAX_CONTEXT_LEN}, {LORA_MODULES} placeholders).
+
+agent:
+  kind: nano
+  backend: apptainer  # or docker; requires SWE-bench env images
+  token_limit: 16384
+  time_limit: 600
+  tool_limit: 200
+  temperature: 0.2
+
+model:
+  base_model: "grpo_repo_repair_model_merged"  # relative to repo root
+  scaffold: "nano-agent"
+
+vllm:
+  command: |
+    uv run vllm serve {BASE_MODEL} \
+      --port {PORT} \
+      --max-model-len {MAX_CONTEXT_LEN} \
+      --max-num-seqs 2 \
+      --gpu-memory-utilization 0.92 \
+      --enable-prefix-caching \
+      --enable-auto-tool-choice \
+      --reasoning-parser qwen3 \
+      --tool-call-parser hermes \
+      {LORA_MODULES}
+  env:
+    MAX_CONTEXT_LEN: 16384
+    VLLM_ALLOW_LONG_MAX_MODEL_LEN: 1
+
+endpoint:
+  provider: vllm
+  base_url: "http://localhost:{PORT}/v1"
+  model_name_format: "hosted_vllm/{MODEL_NAME}"
+  api_key: null
+  litellm_drop_params: true
+  extra_params:
+    enable_thinking: true
+
+eval:
+  subset: verified
+  split: test
+  slice: null
+  output_base_dir: "nano_crrl_8b_swe-bench/"
+  max_workers: 16
+
+job:
+  port: 8001
+  start_server: true

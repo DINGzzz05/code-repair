@@ -1,0 +1,8 @@
+# 4x A800/A100-80GB plan model config: Qwen3-14B SFT-merged checkpoint.
+# Created by train_sft with sft.run_name=crrl_medium_sft_v1.
+# Run all commands from the repository root so this relative path resolves.
+defaults:
+  - small_qwen
+
+model_name: "outputs/crrl_medium_sft_v1_merged"
+attn_implementation: "flash_attention_2"

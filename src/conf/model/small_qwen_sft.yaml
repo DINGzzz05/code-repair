@@ -1,0 +1,9 @@
+# 4x RTX 4090 (24GB) safe-plan model config: Qwen3-8B SFT-merged checkpoint.
+# Created by train_sft with sft.run_name=crrl_8b_sft_v1 (scripts/4090/01_sft_8b.sh).
+# Keep this path in sync with the RUN_NAME passed to 01_sft_8b.sh.
+# Run all commands from the repository root so this relative path resolves.
+defaults:
+  - small_qwen
+
+model_name: "outputs/crrl_8b_sft_v1_merged"
+attn_implementation: "flash_attention_2"
