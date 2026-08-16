@@ -73,7 +73,18 @@ echo "[2/8] creating conda env ${ENV_DIR}"
 CONDA_BASE="$(conda info --base)"
 # shellcheck source=/dev/null
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
-conda create -y -p "${ENV_DIR}" "python=${PY_VER}"
+
+# conda >= 24.5 要求先接受 Anaconda 默认源（repo.anaconda.com）的 ToS，
+# 否则 conda create 会以 CondaToSNonInteractiveError 退出。
+# 接受一次即写入配置，之后不再询问；CONDA_PLUGINS_AUTO_ACCEPT_TOS 兜底。
+conda tos accept --override-channels --channel defaults >/dev/null 2>&1 || true
+export CONDA_PLUGINS_AUTO_ACCEPT_TOS=yes
+
+if [ -f "${ENV_DIR}/conda-meta/history" ]; then
+  echo "  env already exists at ${ENV_DIR}; reusing it"
+else
+  conda create -y -p "${ENV_DIR}" "python=${PY_VER}"
+fi
 conda activate "${ENV_DIR}"
 python -m pip install --upgrade pip
 pip install "setuptools>=75.8.0" wheel uv ninja cmake
@@ -91,13 +102,21 @@ cd "${PROJECT_DIR}"
 echo "[4/8] installing torch ${TORCH_VERSION}"
 pip install "torch==${TORCH_VERSION}" --index-url "${TORCH_INDEX}"
 
-# flash-attn 编译需要 nvcc；没有则用 conda 装 CUDA toolkit
+# flash-attn 编译需要 nvcc；优先用 pip 装（绕开 conda nvidia 频道的 EULA/ToS），
+# 其次才是 conda 的 cuda-toolkit
 if ! command -v nvcc >/dev/null 2>&1; then
-  echo "  nvcc not found; installing CUDA toolkit via conda (about 2-3 GB)"
-  CUDA_VER=$(echo "${TORCH_INDEX}" | grep -o 'cu[0-9]*' | head -1 | sed 's/cu//')
-  CUDA_DOT="${CUDA_VER:0:2}.${CUDA_VER:2}"
-  conda install -y -c nvidia "cuda-toolkit=${CUDA_DOT}"
-  export PATH="${ENV_DIR}/bin:${PATH}"
+  echo "  nvcc not found; installing nvidia-cuda-nvcc via pip"
+  pip install "nvidia-cuda-nvcc-cu12"
+  NVCC_BIN="$(find "${ENV_DIR}" -path '*/cuda_nvcc/bin/nvcc' -type f 2>/dev/null | head -1)"
+  if [ -n "${NVCC_BIN}" ]; then
+    export PATH="$(dirname "${NVCC_BIN}"):${PATH}"
+  else
+    echo "  [WARN] pip nvcc not located; trying conda nvidia channel..."
+    CUDA_VER=$(echo "${TORCH_INDEX}" | grep -o 'cu[0-9]*' | head -1 | sed 's/cu//')
+    CUDA_DOT="${CUDA_VER:0:2}.${CUDA_VER:2}"
+    conda install -y -c nvidia "cuda-toolkit=${CUDA_DOT}"
+    export PATH="${ENV_DIR}/bin:${PATH}"
+  fi
   command -v nvcc >/dev/null 2>&1 || { echo "[ERROR] nvcc still unavailable"; exit 1; }
 fi
 echo "  nvcc: $(command -v nvcc) $("${ENV_DIR}/bin/nvcc" --version 2>/dev/null | tail -1 || nvcc --version | tail -1)"
