@@ -6,7 +6,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Optional
 
-from datasets import load_dataset, Dataset
+from datasets import load_dataset, load_from_disk, Dataset
 
 logger = logging.getLogger(__name__)
 
@@ -440,9 +440,15 @@ def get_swe_gym_formatted_sft_dataset(
         tuple when ``validation_ratio > 0``.
     """
     logger.info(f"Loading curated SFT dataset: {dataset_name}")
-    
-    # Load the curated dataset
-    dataset = load_dataset(dataset_name, split="train")
+
+    # Load the curated dataset. Support a local save_to_disk directory
+    # (e.g. produced by merge_sft_pass_fail.py --output-path) in addition to
+    # a HuggingFace Hub dataset id.
+    if Path(dataset_name).exists():
+        logger.info(f"Local dataset directory detected, loading from disk: {dataset_name}")
+        dataset = load_from_disk(dataset_name)
+    else:
+        dataset = load_dataset(dataset_name, split="train")
     
     logger.info(f"Preparing dataset with {len(dataset)} examples...")
     original_size = len(dataset)
