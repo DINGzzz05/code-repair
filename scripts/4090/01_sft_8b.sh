@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# 4x RTX 4090 (24GB) safe plan - Stage 1: SFT (Qwen3-8B LoRA) on GPU0-1.
+# 4x RTX 4090 (24GB) safe plan - Stage 1: SFT (Qwen3-8B LoRA) on GPU1-2.
+# (GPU0 is reserved for the vLLM inference card / desktop processes.)
 #
 # Usage:
 #   scripts/4090/01_sft_8b.sh [RUN_NAME]
@@ -18,9 +19,9 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 
 RUN_NAME="${1:-crrl_8b_sft_v1}"
 
-echo "=== SFT start: RUN_NAME=${RUN_NAME}, GPUs=0,1 ==="
+echo "=== SFT start: RUN_NAME=${RUN_NAME}, GPUs=1,2 ==="
 
-CUDA_VISIBLE_DEVICES=0,1 uv run accelerate launch \
+CUDA_VISIBLE_DEVICES=1,2 uv run accelerate launch \
   --num_processes=2 --num_machines=1 \
   --mixed_precision=bf16 --dynamo_backend=no \
   --module src.train_sft -- \

@@ -7,7 +7,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| `scripts/4090/01_sft_8b.sh` | Stage 1：SFT（GPU0-1） |
+| `scripts/4090/01_sft_8b.sh` | Stage 1：SFT（GPU1-2，GPU0 留给 vLLM） |
 | `scripts/4090/02_vllm_serve.sh` | Stage 2a：TRL async vLLM（GPU0） |
 | `scripts/4090/03_grpo_8b.sh` | Stage 2b：GRPO/GSPO 训练（GPU1-2） |
 | `scripts/4090/04_eval_serve.sh` | Stage 3a：评测 vLLM（GPU3） |
@@ -38,7 +38,7 @@ export HF_TOKEN=...         # 拉模型/数据集
 ## 3. 执行顺序
 
 ```bash
-# Stage 1: SFT（~1-2h）
+# Stage 1: SFT（~1-2h，GPU1-2）
 scripts/4090/01_sft_8b.sh                      # -> outputs/crrl_8b_sft_v1_merged
 
 # Stage 2a: 终端 1，GPU0 起推理（保持前台运行）
