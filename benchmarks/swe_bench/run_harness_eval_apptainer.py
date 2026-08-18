@@ -75,12 +75,17 @@ WORKDIR_IN_CONTAINER = "/testbed"
 MOUNT_IN_CONTAINER = "/tmp/aeval"
 
 
-def build_image_uri(image_key: str, namespace: Optional[str], registry: str) -> str:
-    """Build the apptainer docker:// URI for an instance image."""
-    image = f"{namespace}/{image_key}" if namespace else image_key
+def build_image_uri(image_key: str, registry: str) -> str:
+    """
+    Build the apptainer docker:// URI for an instance image.
+
+    ``image_key`` is the full image reference (namespace is already baked in,
+    e.g. ``swebench/sweb.eval.x86_64.<instance_id>:latest``); only the registry
+    host needs to be prepended.
+    """
     if registry:
-        return f"docker://{registry}/{image}"
-    return f"docker://{image}"
+        return f"docker://{registry}/{image_key}"
+    return f"docker://{image_key}"
 
 
 def _load_str_list(value: Any) -> list[str]:
@@ -191,7 +196,7 @@ def run_instance(
     report_path = log_dir / LOG_REPORT
     test_output_path = log_dir / LOG_TEST_OUTPUT
 
-    uri = build_image_uri(spec.instance_image_key, namespace, registry)
+    uri = build_image_uri(spec.instance_image_key, registry)
     mount_dir = work_dir / run_id / instance_id
     mount_dir.mkdir(parents=True, exist_ok=True)
 
@@ -306,7 +311,7 @@ def main() -> None:
 
     registry = args.registry
     if registry is None:
-        registry = os.environ.get("APPTAINER_REGISTRY", "").strip().rstrip("/") or "docker.m.daocloud.io"
+        registry = os.environ.get("APPTAINER_REGISTRY", "").strip().rstrip("/") or "docker.1panel.live"
     registry = registry.strip().rstrip("/")
     namespace = None if args.namespace.lower() == "none" else args.namespace
     work_dir = Path(args.work_dir or os.environ.get("TMPDIR") or "/data/dzz/harness_tmp")
@@ -333,7 +338,7 @@ def main() -> None:
         sys.exit("No matching instances to evaluate; aborting.")
 
     use_fakeroot = False if args.no_fakeroot else detect_fakeroot(
-        build_image_uri(specs[0].instance_image_key, namespace, registry), work_dir
+        build_image_uri(specs[0].instance_image_key, registry), work_dir
     )
 
     payloads = [
