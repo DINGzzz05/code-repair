@@ -46,6 +46,12 @@ def main():
         # Replace "__" with "_s_" in instance_id
         transformed_id = instance_id.replace("__", "_s_").lower()
         image_uri = f"docker://xingyaoww/sweb.eval.x86_64.{transformed_id}"
+
+        # Optional China mirror: APPTAINER_REGISTRY=docker.m.daocloud.io
+        registry = os.environ.get("APPTAINER_REGISTRY", "").strip().rstrip("/")
+        if registry:
+            bare = image_uri.removeprefix("docker://").removeprefix("docker.io/")
+            image_uri = f"docker://{registry}/{bare}"
         
         print(f"[{i+1}/{len(dataset)}] Pulling {image_uri}...")
         try:

@@ -61,6 +61,12 @@ def apptainer_env(swebench_sample):
     image_name = f"docker.io/slimshetty/swebench-verified:sweb.eval.x86_64.{instance_id}"
     workdir = "/testbed"
 
+    # Optional China mirror: APPTAINER_REGISTRY=docker.m.daocloud.io
+    registry = os.environ.get("APPTAINER_REGISTRY", "").strip().rstrip("/")
+    if registry:
+        bare = image_name.removeprefix("docker.io/")
+        image_name = f"{registry}/{bare}"
+
     logger.info(f"Creating ApptainerEnvironment for {instance_id}")
     logger.info(f"Image: {image_name}")
 

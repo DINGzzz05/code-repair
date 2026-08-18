@@ -35,8 +35,34 @@ def run_harness(
     split: str,
     max_workers: int,
     timeout: int,
+    backend: str = "docker",
 ) -> Path:
     """Run the SWE-bench harness on one preds file and return its results path."""
+    if backend == "apptainer":
+        cmd = [
+            "uv",
+            "run",
+            "python",
+            "benchmarks/swe_bench/run_harness_eval_apptainer.py",
+            "--dataset-name",
+            dataset_name,
+            "--split",
+            split,
+            "--preds",
+            str(preds_path),
+            "--max-workers",
+            str(max_workers),
+            "--run-id",
+            run_id,
+            "--timeout",
+            str(timeout),
+        ]
+        logger.info(f"Running apptainer harness: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
+        results_path = Path("evaluation_results") / run_id / "instance_results.jsonl"
+        if not results_path.exists():
+            raise FileNotFoundError(f"Harness output not found: {results_path}")
+        return results_path
     cmd = [
         "python",
         "-m",
@@ -76,6 +102,12 @@ def main() -> None:
     parser.add_argument("--run-id-prefix", default="live_diff")
     parser.add_argument("--poll-interval", type=int, default=60)
     parser.add_argument("--timeout", type=int, default=3600)
+    parser.add_argument(
+        "--backend",
+        default="docker",
+        choices=["docker", "apptainer"],
+        help="docker = swebench official harness; apptainer = no-Docker scorer",
+    )
     args = parser.parse_args()
 
     inbox = Path(args.inbox)
@@ -101,6 +133,7 @@ def main() -> None:
                     args.split,
                     args.max_workers,
                     args.timeout,
+                    args.backend,
                 )
                 dest = outbox / f"{run_id}.instance_results.jsonl"
                 shutil.copy2(src, dest)

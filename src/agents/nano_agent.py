@@ -154,6 +154,24 @@ def _construct_image_name(instance_id: str, dataset_name: str) -> str:
     return image_name
 
 
+def _apptainer_image_uri(image_name: str) -> str:
+    """
+    Build a docker:// URI for the Apptainer backend.
+
+    If the APPTAINER_REGISTRY environment variable is set (e.g. a China mirror
+    such as docker.m.daocloud.io), the registry host is prepended so that
+    ``apptainer exec`` pulls through the mirror instead of Docker Hub directly.
+    """
+    registry = os.environ.get("APPTAINER_REGISTRY", "").strip().rstrip("/")
+    if not registry:
+        return f"docker://{image_name}"
+    # docker.io is the default registry host; strip it before prepending the mirror
+    bare = image_name
+    if bare.startswith("docker.io/"):
+        bare = bare[len("docker.io/"):]
+    return f"docker://{registry}/{bare}"
+
+
 @dataclass
 class NanoConfig:
     agent_kind: str = "nano"
@@ -199,7 +217,9 @@ def _process_one(data: dict[str, Any], config: NanoConfig, dataset_name: Optiona
         workdir = "/testbed"
         setup_fn = _get_setup_fn(dataset_name)
         if backend == "apptainer":
-            env = ApptainerEnvironment(image=f"docker://{image_name}", workdir=workdir, setup_fn=setup_fn)
+            env = ApptainerEnvironment(
+                image=_apptainer_image_uri(image_name), workdir=workdir, setup_fn=setup_fn
+            )
         elif backend == "docker":
             env = DockerEnvironment(image=f"{image_name}", workdir=workdir, setup_fn=setup_fn)
         agent_kwargs["env"] = env

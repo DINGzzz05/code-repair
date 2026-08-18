@@ -44,6 +44,12 @@ def main():
         # image_name_tag = instance_id.replace("__", "_1776_")
         # image_uri = f"docker://docker.io/swebench/sweb.eval.x86_64.{image_name_tag}:latest"
         image_uri = f"docker://slimshetty/swebench-verified:sweb.eval.x86_64.{instance_id}"
+
+        # Optional China mirror: APPTAINER_REGISTRY=docker.m.daocloud.io
+        registry = os.environ.get("APPTAINER_REGISTRY", "").strip().rstrip("/")
+        if registry:
+            bare = image_uri.removeprefix("docker://").removeprefix("docker.io/")
+            image_uri = f"docker://{registry}/{bare}"
         
         print(f"[{i+1}/{len(dataset)}] Pulling {image_uri}...")
         try:
