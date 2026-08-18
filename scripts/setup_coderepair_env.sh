@@ -85,7 +85,12 @@ if [ -f "${ENV_DIR}/conda-meta/history" ]; then
 else
   conda create -y -p "${ENV_DIR}" "python=${PY_VER}"
 fi
+# conda 26.x 的 activate 会在 deactivate hooks 里引用未设置的环境变量
+# （如 _CONDA_PYTHON_SYSCONFIGDATA_NAME_USED），与 `set -u` 冲突导致脚本中断；
+# 在 activate 前后临时放宽，之后立即恢复。
+set +u
 conda activate "${ENV_DIR}"
+set -u
 python -m pip install --upgrade pip
 pip install "setuptools>=75.8.0" wheel uv ninja cmake
 
