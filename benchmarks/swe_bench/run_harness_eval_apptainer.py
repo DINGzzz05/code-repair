@@ -162,17 +162,41 @@ def detect_fakeroot(uri: str, mount_dir: Path) -> bool:
         return False
 
 
+def detect_tmpfs(uri: str, mount_dir: Path) -> bool:
+    """Probe whether ``apptainer exec --writable-tmpfs`` works (no root needed)."""
+    try:
+        subprocess.run(
+            [
+                "apptainer", "exec", "--writable-tmpfs",
+                "--bind", f"{mount_dir}:{MOUNT_IN_CONTAINER}",
+                uri, "/bin/true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True,
+        )
+        print("  [INFO] --writable-tmpfs works; using no-root writable overlay")
+        return True
+    except Exception:
+        print("  [WARN] --writable-tmpfs unavailable; image filesystem will be read-only")
+        return False
+
+
 def apptainer_exec(
     uri: str,
     mount_dir: Path,
     command: str,
     use_fakeroot: bool,
     timeout: int,
+    writable_tmpfs: bool = False,
 ) -> subprocess.CompletedProcess:
     """Run a command inside the instance image via apptainer exec."""
     argv = ["apptainer", "exec"]
     if use_fakeroot:
         argv.append("--fakeroot")
+    if writable_tmpfs:
+        argv.append("--writable-tmpfs")
     argv += [
         # Let git operate on the root-owned repo without --fakeroot
         "--env", "GIT_CONFIG_COUNT=1",
@@ -184,6 +208,19 @@ def apptainer_exec(
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
 
+COMBINED_EVAL_SCRIPT = """#!/bin/bash
+set -u
+cd {workdir} || exit 2
+if {apply1} || {apply2} || {apply3}; then
+  echo applied > {mount}/patch_status
+else
+  echo failed > {mount}/patch_status
+  exit 1
+fi
+/bin/bash {mount}/eval.sh
+"""
+
+
 def run_instance(
     spec: Any,
     pred: dict[str, str],
@@ -193,6 +230,7 @@ def run_instance(
     work_dir: Path,
     timeout: int,
     use_fakeroot: bool,
+    use_tmpfs: bool = False,
 ) -> dict[str, Any]:
     """Evaluate one instance with apptainer; mirrors swebench run_instance."""
     instance_id = spec.instance_id
@@ -221,52 +259,108 @@ def run_instance(
     patch_path = mount_dir / "patch.diff"
     patch_path.write_text(pred[KEY_PREDICTION] or "", encoding="utf-8")
 
-    print(f"  [..] {instance_id}: applying patch", flush=True)
-    # 1. Apply the model patch inside the image (same fallback chain as harness)
-    apply_cmd = f"cd {WORKDIR_IN_CONTAINER} && " + " || ".join(
-        f"{c} {MOUNT_IN_CONTAINER}/patch.diff" for c in APP_APPLY_CMDS
-    )
-    try:
-        apply_res = apptainer_exec(uri, mount_dir, apply_cmd, use_fakeroot, timeout)
-    except subprocess.TimeoutExpired:
-        result["error"] = f"patch apply timed out after {timeout}s"
-        return result
-    if apply_res.returncode != 0:
-        result["error"] = f"patch apply failed:\n{apply_res.stdout}\n{apply_res.stderr}"
-        report_path.write_text(
-            json.dumps(
-                {
-                    instance_id: {
-                        "patch_is_None": False,
-                        "patch_exists": True,
-                        "patch_successfully_applied": False,
-                        "resolved": False,
-                    }
-                },
-                indent=4,
-            ),
-            encoding="utf-8",
-        )
-        return result
+    patch_status_path = mount_dir / "patch_status"
 
-    print(f"  [..] {instance_id}: running tests (this can take a while)", flush=True)
-    # 2. Run the eval script (applies test patch + runs tests)
-    eval_path = mount_dir / "eval.sh"
-    eval_path.write_text(spec.eval_script, encoding="utf-8")
-    try:
-        eval_res = apptainer_exec(
-            uri, mount_dir, f"/bin/bash {MOUNT_IN_CONTAINER}/eval.sh",
-            use_fakeroot, timeout,
+    if use_tmpfs:
+        # --writable-tmpfs gives a fresh writable overlay per exec, so patch
+        # application and test execution MUST share a single exec.
+        eval_path = mount_dir / "eval.sh"
+        eval_path.write_text(spec.eval_script, encoding="utf-8")
+        run_script = COMBINED_EVAL_SCRIPT.format(
+            workdir=WORKDIR_IN_CONTAINER,
+            mount=MOUNT_IN_CONTAINER,
+            apply1=f"{APP_APPLY_CMDS[0]} {MOUNT_IN_CONTAINER}/patch.diff",
+            apply2=f"{APP_APPLY_CMDS[1]} {MOUNT_IN_CONTAINER}/patch.diff",
+            apply3=f"{APP_APPLY_CMDS[2]} {MOUNT_IN_CONTAINER}/patch.diff",
         )
-    except subprocess.TimeoutExpired:
-        test_output_path.write_text(
-            f"\n\nTimeout error: {timeout} seconds exceeded.", encoding="utf-8"
+        (mount_dir / "run.sh").write_text(run_script, encoding="utf-8")
+        print(
+            f"  [..] {instance_id}: applying patch + running tests (writable-tmpfs)",
+            flush=True,
         )
-        result["error"] = f"test run timed out after {timeout}s"
-        return result
+        try:
+            run_res = apptainer_exec(
+                uri, mount_dir, f"/bin/bash {MOUNT_IN_CONTAINER}/run.sh",
+                use_fakeroot=False, timeout=timeout, writable_tmpfs=True,
+            )
+        except subprocess.TimeoutExpired:
+            test_output_path.write_text(
+                f"\n\nTimeout error: {timeout} seconds exceeded.", encoding="utf-8"
+            )
+            result["error"] = f"test run timed out after {timeout}s"
+            return result
+        if patch_status_path.exists() and patch_status_path.read_text(
+            encoding="utf-8"
+        ).strip() == "failed":
+            result["error"] = (
+                f"patch apply failed:\n{run_res.stdout}\n{run_res.stderr}"
+            )
+            report_path.write_text(
+                json.dumps(
+                    {
+                        instance_id: {
+                            "patch_is_None": False,
+                            "patch_exists": True,
+                            "patch_successfully_applied": False,
+                            "resolved": False,
+                        }
+                    },
+                    indent=4,
+                ),
+                encoding="utf-8",
+            )
+            return result
+        combined = (run_res.stdout or "") + (run_res.stderr or "")
+        test_output_path.write_text(combined, encoding="utf-8")
+    else:
+        print(f"  [..] {instance_id}: applying patch", flush=True)
+        # 1. Apply the model patch inside the image (same fallback chain as harness)
+        apply_cmd = f"cd {WORKDIR_IN_CONTAINER} && " + " || ".join(
+            f"{c} {MOUNT_IN_CONTAINER}/patch.diff" for c in APP_APPLY_CMDS
+        )
+        try:
+            apply_res = apptainer_exec(uri, mount_dir, apply_cmd, use_fakeroot, timeout)
+        except subprocess.TimeoutExpired:
+            result["error"] = f"patch apply timed out after {timeout}s"
+            return result
+        if apply_res.returncode != 0:
+            result["error"] = (
+                f"patch apply failed:\n{apply_res.stdout}\n{apply_res.stderr}"
+            )
+            report_path.write_text(
+                json.dumps(
+                    {
+                        instance_id: {
+                            "patch_is_None": False,
+                            "patch_exists": True,
+                            "patch_successfully_applied": False,
+                            "resolved": False,
+                        }
+                    },
+                    indent=4,
+                ),
+                encoding="utf-8",
+            )
+            return result
 
-    combined = (eval_res.stdout or "") + (eval_res.stderr or "")
-    test_output_path.write_text(combined, encoding="utf-8")
+        print(f"  [..] {instance_id}: running tests (this can take a while)", flush=True)
+        # 2. Run the eval script (applies test patch + runs tests)
+        eval_path = mount_dir / "eval.sh"
+        eval_path.write_text(spec.eval_script, encoding="utf-8")
+        try:
+            eval_res = apptainer_exec(
+                uri, mount_dir, f"/bin/bash {MOUNT_IN_CONTAINER}/eval.sh",
+                use_fakeroot, timeout,
+            )
+        except subprocess.TimeoutExpired:
+            test_output_path.write_text(
+                f"\n\nTimeout error: {timeout} seconds exceeded.", encoding="utf-8"
+            )
+            result["error"] = f"test run timed out after {timeout}s"
+            return result
+
+        combined = (eval_res.stdout or "") + (eval_res.stderr or "")
+        test_output_path.write_text(combined, encoding="utf-8")
 
     # 3. Grade using the official swebench report logic
     try:
@@ -308,13 +402,15 @@ def main() -> None:
     parser.add_argument(
         "--registry", default=None,
         help="OCI registry mirror for docker:// pulls (default: $APPTAINER_REGISTRY "
-             "or docker.m.daocloud.io; use '' for Docker Hub)",
+             "or docker.1panel.live; use '' for Docker Hub)",
     )
     parser.add_argument("--work-dir", default=None,
                         help="Temp dir for eval scripts/patches (default: $TMPDIR "
                              "or /data/dzz/harness_tmp)")
     parser.add_argument("--no-fakeroot", action="store_true",
                         help="Disable --fakeroot probing; run as current user")
+    parser.add_argument("--writable-tmpfs", action="store_true",
+                        help="Force --writable-tmpfs (no-root writable overlay) mode")
     args = parser.parse_args()
 
     registry = args.registry
@@ -345,9 +441,18 @@ def main() -> None:
     if not specs:
         sys.exit("No matching instances to evaluate; aborting.")
 
-    use_fakeroot = False if args.no_fakeroot else detect_fakeroot(
-        build_image_uri(specs[0].instance_image_key, registry), work_dir
-    )
+    probe_uri = build_image_uri(specs[0].instance_image_key, registry)
+    use_fakeroot = False
+    use_tmpfs = False
+    if args.writable_tmpfs:
+        use_tmpfs = True
+        print("  [INFO] --writable-tmpfs forced; using no-root writable overlay")
+    elif args.no_fakeroot:
+        use_tmpfs = detect_tmpfs(probe_uri, work_dir)
+    else:
+        use_fakeroot = detect_fakeroot(probe_uri, work_dir)
+        if not use_fakeroot:
+            use_tmpfs = detect_tmpfs(probe_uri, work_dir)
 
     payloads = [
         (spec, pred_map[spec.instance_id]) for spec in specs
@@ -357,7 +462,7 @@ def main() -> None:
         futures = {
             executor.submit(
                 run_instance, spec, pred, args.run_id, registry, namespace,
-                work_dir, args.timeout, use_fakeroot,
+                work_dir, args.timeout, use_fakeroot, use_tmpfs,
             ): spec.instance_id
             for spec, pred in payloads
         }
