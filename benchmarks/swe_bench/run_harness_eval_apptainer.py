@@ -64,10 +64,12 @@ SUBSET_TO_DATASET = {
     "r2e-gym": "R2E-Gym/SWE-Bench-Verified",
 }
 
-# Same patch application fallbacks as swebench.harness.run_evaluation
-GIT_APPLY_CMDS = [
-    "git apply --verbose",
-    "git apply --verbose --reject",
+# Patch application fallbacks (mirror swebench.harness.run_evaluation), with
+# safe.directory injected so git works when /testbed is owned by a different
+# user (the common case when running without --fakeroot).
+APP_APPLY_CMDS = [
+    "git -c safe.directory=/testbed apply --verbose",
+    "git -c safe.directory=/testbed apply --verbose --reject",
     "patch --batch --fuzz=5 -p1 -i",
 ]
 
@@ -172,6 +174,10 @@ def apptainer_exec(
     if use_fakeroot:
         argv.append("--fakeroot")
     argv += [
+        # Let git operate on the root-owned repo without --fakeroot
+        "--env", "GIT_CONFIG_COUNT=1",
+        "--env", "GIT_CONFIG_KEY_0=safe.directory",
+        "--env", "GIT_CONFIG_VALUE_0=/testbed",
         "--bind", f"{mount_dir}:{MOUNT_IN_CONTAINER}",
         uri, "/bin/bash", "-c", command,
     ]
@@ -215,9 +221,10 @@ def run_instance(
     patch_path = mount_dir / "patch.diff"
     patch_path.write_text(pred[KEY_PREDICTION] or "", encoding="utf-8")
 
+    print(f"  [..] {instance_id}: applying patch", flush=True)
     # 1. Apply the model patch inside the image (same fallback chain as harness)
     apply_cmd = f"cd {WORKDIR_IN_CONTAINER} && " + " || ".join(
-        f"{c} {MOUNT_IN_CONTAINER}/patch.diff" for c in GIT_APPLY_CMDS
+        f"{c} {MOUNT_IN_CONTAINER}/patch.diff" for c in APP_APPLY_CMDS
     )
     try:
         apply_res = apptainer_exec(uri, mount_dir, apply_cmd, use_fakeroot, timeout)
@@ -242,6 +249,7 @@ def run_instance(
         )
         return result
 
+    print(f"  [..] {instance_id}: running tests (this can take a while)", flush=True)
     # 2. Run the eval script (applies test patch + runs tests)
     eval_path = mount_dir / "eval.sh"
     eval_path.write_text(spec.eval_script, encoding="utf-8")
