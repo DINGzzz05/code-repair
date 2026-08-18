@@ -47,7 +47,9 @@ from swebench.harness.constants import (
     LOG_TEST_OUTPUT,
 )
 from swebench.harness.grading import get_eval_report
-from swebench.harness.test_spec.test_spec import make_test_spec
+from swebench.harness.constants import MAP_REPO_TO_EXT, MAP_REPO_VERSION_TO_SPECS
+from swebench.harness.test_spec.create_scripts import make_eval_script_list
+from swebench.harness.test_spec.test_spec import TestSpec
 from swebench.harness.utils import (
     get_predictions_from_file,
     load_swebench_dataset,
@@ -79,6 +81,54 @@ def build_image_uri(image_key: str, namespace: Optional[str], registry: str) -> 
     if registry:
         return f"docker://{registry}/{image}"
     return f"docker://{image}"
+
+
+def _load_str_list(value: Any) -> list[str]:
+    """Parse FAIL_TO_PASS / PASS_TO_PASS which may be JSON strings."""
+    if isinstance(value, str):
+        return json.loads(value)
+    return list(value or [])
+
+
+def build_test_spec_offline(
+    instance: dict[str, Any], namespace: Optional[str] = None
+) -> TestSpec:
+    """
+    Build a TestSpec without network access.
+
+    swebench's ``make_test_spec()`` fetches per-repo requirements files from
+    raw.githubusercontent.com to generate env/repo scripts. Those scripts are
+    only needed for building images; when evaluating with prebuilt official
+    instance images they are unnecessary. Skipping them lets the scorer work
+    on machines where GitHub raw is unreachable.
+    """
+    repo = instance["repo"]
+    version = instance["version"]
+    specs = MAP_REPO_VERSION_TO_SPECS[repo][version]
+    env_name = "testbed"
+    repo_directory = f"/{env_name}"
+    eval_script_list = make_eval_script_list(
+        instance,
+        specs,
+        env_name,
+        repo_directory,
+        instance["base_commit"],
+        instance["test_patch"],
+    )
+    return TestSpec(
+        instance_id=instance[KEY_INSTANCE_ID],
+        repo=repo,
+        version=version,
+        repo_script_list=[],
+        eval_script_list=eval_script_list,
+        env_script_list=[],
+        arch="x86_64",
+        FAIL_TO_PASS=_load_str_list(instance.get("FAIL_TO_PASS", [])),
+        PASS_TO_PASS=_load_str_list(instance.get("PASS_TO_PASS", [])),
+        language=MAP_REPO_TO_EXT[repo],
+        docker_specs=specs.get("docker_specs", {}),
+        namespace=namespace,
+    )
 
 
 def detect_fakeroot(uri: str, mount_dir: Path) -> bool:
@@ -271,7 +321,7 @@ def main() -> None:
     pred_map = {p[KEY_INSTANCE_ID]: p for p in predictions}
 
     specs = [
-        make_test_spec(x, namespace=namespace)
+        build_test_spec_offline(x, namespace=namespace)
         for x in dataset
         if x[KEY_INSTANCE_ID] in pred_map
     ]
