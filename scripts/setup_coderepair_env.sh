@@ -92,7 +92,7 @@ set +u
 conda activate "${ENV_DIR}"
 set -u
 python -m pip install --upgrade pip
-pip install "setuptools>=75.8.0" wheel uv ninja cmake
+pip install "setuptools>=75.8.0" wheel uv ninja cmake psutil numpy
 
 # ---------- 2. 项目代码 ----------
 echo "[3/8] project code"
